@@ -11,6 +11,9 @@ inspector_port = 9230
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_LOCAL_KV_ID"
 
+[ai]
+binding = "AI"
+
 # ═══════════════════════════════════════════════════════════
 # DEVELOPMENT
 # ═══════════════════════════════════════════════════════════
@@ -26,7 +29,7 @@ binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_DEV_KV_ID"
 
 # wrangler secret put ADMIN_KEY          --env development
-# wrangler secret put OPENROUTER_API_KEY --env development
+# wrangler secret put VOYAGE_API_KEY     --env development
 
 # ═══════════════════════════════════════════════════════════
 # STAGING
@@ -43,7 +46,7 @@ binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_STAGING_KV_ID"
 
 # wrangler secret put ADMIN_KEY          --env staging
-# wrangler secret put OPENROUTER_API_KEY --env staging
+# wrangler secret put VOYAGE_API_KEY     --env staging
 
 # ═══════════════════════════════════════════════════════════
 # PRODUCTION
@@ -60,4 +63,4 @@ binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_PRODUCTION_KV_ID"
 
 # wrangler secret put ADMIN_KEY          --env production
-# wrangler secret put OPENROUTER_API_KEY --env production
+# wrangler secret put VOYAGE_API_KEY     --env production

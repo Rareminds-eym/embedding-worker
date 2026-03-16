@@ -3,10 +3,10 @@
 export interface Env {
   EMBEDDING_KV: KVNamespace;
   ADMIN_KEY: string;
-  OPENROUTER_API_KEY: string;
   VOYAGE_API_KEY: string;
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
+  AI: Ai;
 }
 
 export interface TenantConfig {

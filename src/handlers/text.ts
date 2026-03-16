@@ -1,16 +1,13 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import type { Env, RequestContext } from '../types';
-import { ValidationError, ProviderError } from '../types';
+import { ValidationError } from '../types';
 import { jsonOk } from '../utils/response';
-import { OPENROUTER, resolveModel } from '../providers';
+import { resolveModel, callTextProvider } from '../providers';
 import {
   MAX_INPUT_CHARS,
   MAX_BATCH_SIZE,
   MAX_REQUEST_BODY_SIZE,
-  OPENROUTER_TIMEOUT_MS,
-  RETRY_DELAY_MS,
-  MAX_RETRIES,
   ERROR_CODES,
 } from '../constants';
 
@@ -31,54 +28,6 @@ function normalizeInput(input: unknown): string[] {
     'input must be a string, array, or object',
     ERROR_CODES.INVALID_INPUT
   );
-}
-
-// ── Call OpenRouter embeddings API ─────────────────────────
-async function callOpenRouter(
-  inputs: string[],
-  model: string,
-  apiKey: string,
-  tenantId: string,
-  attempt = 0
-): Promise<{ data: { embedding: number[] }[]; usage: { prompt_tokens: number } }> {
-  const res = await fetch(OPENROUTER.endpoint, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ model, input: inputs }),
-    signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
-  });
-
-  // Retry once on 5xx
-  if (res.status >= 500 && attempt < MAX_RETRIES) {
-    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-    return callOpenRouter(inputs, model, apiKey, tenantId, attempt + 1);
-  }
-
-  if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    // Log full error internally — never expose to client
-    console.error(JSON.stringify({
-      event: 'provider.error',
-      status: res.status,
-      body: errText.slice(0, 500),
-      tenant_id: tenantId,
-      model,
-    }));
-    throw new ProviderError(`Embedding provider error (${res.status})`, res.status);
-  }
-
-  const json = await res.json() as { data: { embedding: number[] }[]; usage: { prompt_tokens: number } };
-
-  // Validate provider response shape before use
-  if (!json?.data || !Array.isArray(json.data) || json.data.length === 0) {
-    console.error(JSON.stringify({ event: 'provider.invalid_response', tenant_id: tenantId, model }));
-    throw new ProviderError('Invalid response from embedding provider', 502);
-  }
-
-  return json;
 }
 
 // ── Handler ────────────────────────────────────────────────
@@ -124,11 +73,11 @@ export async function handleTextEmbed(
   }
 
   const modelConfig = resolveModel(undefined);
-  const result = await callOpenRouter(inputs, modelConfig.id, env.OPENROUTER_API_KEY, ctx.tenantId);
+  const result = await callTextProvider(inputs, modelConfig.id, env.VOYAGE_API_KEY, ctx.tenantId);
 
   const firstItem = result.data[0];
   const embedding: number[] = firstItem.embedding;
-  const promptTokens = result.usage?.prompt_tokens ?? 0;
+  const promptTokens = result.usage?.total_tokens ?? 0;
   const estimatedCost = ((promptTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);
 
   return jsonOk({
@@ -137,7 +86,7 @@ export async function handleTextEmbed(
     model: modelConfig.id,
     dimensions: embedding.length,
     usage: {
-      prompt_tokens: promptTokens,
+      total_tokens: promptTokens,
       estimated_cost_usd: estimatedCost,
     },
     request_id: ctx.requestId,
