@@ -66,9 +66,11 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
     );
   }
   if (err instanceof ProviderError) {
+    const status = err.status === 429 ? 429 : (err.status >= 400 && err.status < 600 ? err.status : 502);
+    const errorCode = err.status === 429 ? ERROR_CODES.RATE_LIMIT_EXCEEDED : ERROR_CODES.PROVIDER_ERROR;
     return new Response(
-      JSON.stringify({ success: false, errorCode: ERROR_CODES.PROVIDER_ERROR, message: err.message, request_id: requestId }),
-      { status: 502, headers }
+      JSON.stringify({ success: false, errorCode, message: err.message, request_id: requestId }),
+      { status, headers }
     );
   }
   if (err instanceof WorkerError) {

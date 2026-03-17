@@ -86,12 +86,33 @@ export async function callTextProvider(
   tenantId: string,
   attempt = 0
 ): Promise<TextProviderResponse> {
-  const res = await fetch(VOYAGE.textEndpoint, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, input: inputs }),
-    signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
-  });
+  let res: Response;
+  try {
+    res = await fetch(VOYAGE.textEndpoint, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input: inputs }),
+      signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (attempt < MAX_RETRIES) {
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      return callTextProvider(inputs, model, apiKey, tenantId, attempt + 1);
+    }
+    throw new ProviderError('Embedding provider unreachable', 502);
+  }
+
+  if (res.status === 429 && attempt < MAX_RETRIES) {
+    const retryAfterHeader = res.headers.get('Retry-After');
+    const retryAfterSeconds = Number(retryAfterHeader);
+    const retryAfterMs = Number.isFinite(retryAfterSeconds)
+      ? retryAfterSeconds * 1000
+      : retryAfterHeader
+        ? Math.max(0, Date.parse(retryAfterHeader) - Date.now())
+        : 2000;
+    await new Promise(r => setTimeout(r, retryAfterMs));
+    return callTextProvider(inputs, model, apiKey, tenantId, attempt + 1);
+  }
 
   if (res.status >= 500 && attempt < MAX_RETRIES) {
     await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
@@ -99,8 +120,7 @@ export async function callTextProvider(
   }
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'text', status: res.status, body: errText.slice(0, 500), tenant_id: tenantId, model }));
+    console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'text', status: res.status, tenant_id: tenantId, model }));
     throw new ProviderError(`Embedding provider error (${res.status})`, res.status);
   }
 
@@ -120,12 +140,33 @@ export async function callImageProvider(
   tenantId: string,
   attempt = 0
 ): Promise<ImageProviderResponse> {
-  const res = await fetch(VOYAGE.imageEndpoint, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, inputs }),
-    signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
-  });
+  let res: Response;
+  try {
+    res = await fetch(VOYAGE.imageEndpoint, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, inputs }),
+      signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    if (attempt < MAX_RETRIES) {
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      return callImageProvider(inputs, model, apiKey, tenantId, attempt + 1);
+    }
+    throw new ProviderError('Image embedding provider unreachable', 502);
+  }
+
+  if (res.status === 429 && attempt < MAX_RETRIES) {
+    const retryAfterHeader = res.headers.get('Retry-After');
+    const retryAfterSeconds = Number(retryAfterHeader);
+    const retryAfterMs = Number.isFinite(retryAfterSeconds)
+      ? retryAfterSeconds * 1000
+      : retryAfterHeader
+        ? Math.max(0, Date.parse(retryAfterHeader) - Date.now())
+        : 2000;
+    await new Promise(r => setTimeout(r, retryAfterMs));
+    return callImageProvider(inputs, model, apiKey, tenantId, attempt + 1);
+  }
 
   if (res.status >= 500 && attempt < MAX_RETRIES) {
     await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
@@ -133,8 +174,7 @@ export async function callImageProvider(
   }
 
   if (!res.ok) {
-    const errText = await res.text().catch(() => '');
-    console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'image', status: res.status, body: errText.slice(0, 500), tenant_id: tenantId, model }));
+    console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'image', status: res.status, tenant_id: tenantId, model }));
     throw new ProviderError(`Image embedding provider error (${res.status})`, res.status);
   }
 
@@ -160,16 +200,32 @@ export async function callDocProvider(
     let attempt = 0;
 
     while (true) {
-      const res = await fetch(VOYAGE.textEndpoint, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, input: batch }),
-        signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
-      });
+      let res: Response;
+      try {
+        res = await fetch(VOYAGE.textEndpoint, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, input: batch }),
+          signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
+        });
+      } catch (err) {
+        if (attempt < MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+          attempt++;
+          continue;
+        }
+        throw new ProviderError('Embedding provider unreachable', 502);
+      }
 
       if (res.status === 429 && attempt < MAX_RETRIES) {
-        const retryAfter = parseInt(res.headers.get('Retry-After') ?? '2', 10);
-        await new Promise(r => setTimeout(r, retryAfter * 1000));
+        const retryAfterHeader = res.headers.get('Retry-After');
+        const retryAfterSeconds = Number(retryAfterHeader);
+        const retryAfterMs = Number.isFinite(retryAfterSeconds)
+          ? retryAfterSeconds * 1000
+          : retryAfterHeader
+            ? Math.max(0, Date.parse(retryAfterHeader) - Date.now())
+            : 2000;
+        await new Promise(r => setTimeout(r, retryAfterMs));
         attempt++;
         continue;
       }
@@ -181,8 +237,7 @@ export async function callDocProvider(
       }
 
       if (!res.ok) {
-        const errText = await res.text().catch(() => '');
-        console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'doc', status: res.status, body: errText.slice(0, 500), tenant_id: tenantId, model, batch_start: i }));
+        console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'doc', status: res.status, tenant_id: tenantId, model, batch_start: i }));
         throw new ProviderError(`Embedding provider error (${res.status})`, res.status);
       }
 

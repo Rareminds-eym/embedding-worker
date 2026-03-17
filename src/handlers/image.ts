@@ -32,7 +32,13 @@ function normalizeInput(input: unknown): ImageInput[] {
     }
 
     if (obj.type === 'url') {
-      try { new URL(obj.data as string); } catch {
+      try {
+        const parsed = new URL(obj.data as string);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw new ValidationError('input.data URL must use http or https scheme', ERROR_CODES.INVALID_INPUT);
+        }
+      } catch (e) {
+        if (e instanceof ValidationError) throw e;
         throw new ValidationError('input.data must be a valid URL', ERROR_CODES.INVALID_INPUT);
       }
       return { type: 'url', data: obj.data as string };
@@ -47,7 +53,10 @@ function normalizeInput(input: unknown): ImageInput[] {
     return { type: 'base64', data: obj.data as string, mediaType: obj.mediaType as AllowedMediaType };
   };
 
-  if (Array.isArray(input)) return input.map(toItem);
+  if (Array.isArray(input)) {
+    if (input.length === 0) throw new ValidationError('input array must not be empty', ERROR_CODES.INVALID_INPUT);
+    return input.map(toItem);
+  }
   return [toItem(input)];
 }
 

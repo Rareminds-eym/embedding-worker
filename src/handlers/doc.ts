@@ -101,7 +101,7 @@ export async function handleDocEmbed(
   }
 
   const mimeType = input.mimeType as string;
-  if (!mimeType || !(mimeType in ALLOWED_DOC_TYPES)) {
+  if (!mimeType || !Object.prototype.hasOwnProperty.call(ALLOWED_DOC_TYPES, mimeType)) {
     throw new ValidationError(
       `input.mimeType must be one of: ${Object.keys(ALLOWED_DOC_TYPES).join(', ')}`,
       ERROR_CODES.INVALID_INPUT
@@ -141,7 +141,9 @@ export async function handleDocEmbed(
       { name: filename, blob },
       { conversionOptions: { pdf: { metadata: false } } }
     );
-    conversionResult = Array.isArray(results) ? results[0] : results;
+    const item = Array.isArray(results) ? results[0] : results;
+    if (!item) throw new WorkerError('Document conversion returned no result', ERROR_CODES.INTERNAL_ERROR, 500);
+    conversionResult = item;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const isTimeout = /timeout|timed out/i.test(msg);

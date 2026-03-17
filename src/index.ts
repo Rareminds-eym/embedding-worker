@@ -28,8 +28,13 @@ export default {
         ? MAX_IMAGE_REQUEST_BODY_SIZE
         : MAX_REQUEST_BODY_SIZE;
 
-    if (contentLength && Number(contentLength) > routeLimit) {
-      return jsonError('Request body too large', 413, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+    if (contentLength) {
+      if (!/^\d+$/.test(contentLength)) {
+        return jsonError('Invalid Content-Length header', 400, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+      }
+      if (Number(contentLength) > routeLimit) {
+        return jsonError('Request body too large', 413, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+      }
     }
 
     try {
