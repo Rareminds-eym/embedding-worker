@@ -246,7 +246,9 @@ export async function callDocProvider(
         throw new ProviderError('Invalid response from embedding provider', 502);
       }
 
-      json.data.forEach((item, j) => result.embeddings.push({ index: i + j, embedding: item.embedding }));
+      for (let j = 0; j < json.data.length; j++) {
+        result.embeddings.push({ index: i + j, embedding: json.data[j].embedding });
+      }
       result.total_tokens += json.usage?.total_tokens ?? 0;
       break;
     }
