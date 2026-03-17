@@ -129,6 +129,10 @@ export async function callTextProvider(
     console.error(JSON.stringify({ event: 'provider.invalid_response', provider: VOYAGE.name, endpoint: 'text', tenant_id: tenantId, model }));
     throw new ProviderError('Invalid response from embedding provider', 502);
   }
+  if (json.data.length !== inputs.length) {
+    console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'text', tenant_id: tenantId, model, expected: inputs.length, received: json.data.length }));
+    throw new ProviderError('Partial response from embedding provider', 502);
+  }
 
   return json;
 }
@@ -183,6 +187,10 @@ export async function callImageProvider(
     console.error(JSON.stringify({ event: 'provider.invalid_response', provider: VOYAGE.name, endpoint: 'image', tenant_id: tenantId, model }));
     throw new ProviderError('Invalid response from image embedding provider', 502);
   }
+  if (json.data.length !== inputs.length) {
+    console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'image', tenant_id: tenantId, model, expected: inputs.length, received: json.data.length }));
+    throw new ProviderError('Partial response from image embedding provider', 502);
+  }
 
   return json;
 }
@@ -210,7 +218,7 @@ export async function callDocProvider(
         });
       } catch (err) {
         if (attempt < MAX_RETRIES) {
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
           attempt++;
           continue;
         }
@@ -244,6 +252,10 @@ export async function callDocProvider(
       const json = await res.json() as TextProviderResponse;
       if (!json?.data || !Array.isArray(json.data) || json.data.length === 0) {
         throw new ProviderError('Invalid response from embedding provider', 502);
+      }
+      if (json.data.length !== batch.length) {
+        console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'doc', tenant_id: tenantId, model, expected: batch.length, received: json.data.length, batch_start: i }));
+        throw new ProviderError('Partial response from embedding provider', 502);
       }
 
       for (let j = 0; j < json.data.length; j++) {
