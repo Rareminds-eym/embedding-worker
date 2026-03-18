@@ -39,9 +39,13 @@ export async function authenticate(request: Request, env: Env, requestId: string
   };
 }
 
-export function authenticateAdmin(request: Request, env: Env): void {
-  const key = request.headers.get('X-Admin-Key');
-  if (!key || key !== env.ADMIN_KEY) {
+export async function authenticateAdmin(request: Request, env: Env): Promise<void> {
+  const key = request.headers.get('X-Admin-Key') ?? '';
+  const enc = new TextEncoder();
+  const a = enc.encode(key.padEnd(64));
+  const b = enc.encode((env.ADMIN_KEY ?? '').padEnd(64));
+  const match = await crypto.subtle.timingSafeEqual(a, b);
+  if (!match || key.length === 0) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
   }
 }

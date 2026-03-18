@@ -42,13 +42,12 @@ export default {
         return jsonOk({
           status: 'ok',
           version: API_VERSION,
-          environment: env.ENVIRONMENT,
           timestamp: new Date().toISOString(),
         }, 200, request, env);
       }
 
       if (pathname.startsWith('/admin/')) {
-        authenticateAdmin(request, env);
+        await authenticateAdmin(request, env);
         return await handleAdmin(request, env);
       }
 

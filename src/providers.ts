@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import { ProviderError } from './types';
+import { ProviderError, RateLimitError } from './types';
 import { VOYAGE_TIMEOUT_MS, RETRY_DELAY_MS, MAX_RETRIES, DOC_BATCH_SIZE } from './constants';
 
 export interface ModelConfig {
@@ -25,16 +25,22 @@ export const VOYAGE: ProviderConfig = {
   name: 'voyage',
   textEndpoint:  'https://api.voyageai.com/v1/embeddings',
   imageEndpoint: 'https://api.voyageai.com/v1/multimodalembeddings',
-  defaultTextModel:  'voyage-3',
-  defaultDocModel:   'voyage-3',
+  defaultTextModel:  'voyage-4',
+  defaultDocModel:   'voyage-4',
   defaultImageModel: 'voyage-multimodal-3.5',
-  textModelKeys:  ['voyage-3', 'voyage-3-lite'],
+  textModelKeys:  ['voyage-4', 'voyage-4-lite', 'voyage-4-large', 'voyage-3', 'voyage-3-lite'],
   imageModelKeys: ['voyage-multimodal-3.5', 'voyage-multimodal-3'],
   models: {
-    'voyage-3':             { id: 'voyage-3',             dimensions: 1024, costPer1M: 0.06 },
-    'voyage-3-lite':        { id: 'voyage-3-lite',        dimensions: 512,  costPer1M: 0.02 },
-    'voyage-multimodal-3.5':{ id: 'voyage-multimodal-3.5',dimensions: 1024, costPer1M: 0.12 },
-    'voyage-multimodal-3':  { id: 'voyage-multimodal-3',  dimensions: 1024, costPer1M: 0.12 },
+    // Current generation (voyage-4 series) — 200M free tokens each
+    'voyage-4':             { id: 'voyage-4',       dimensions: 1024, costPer1M: 0.06 },
+    'voyage-4-lite':        { id: 'voyage-4-lite',  dimensions: 1024, costPer1M: 0.02 },
+    'voyage-4-large':       { id: 'voyage-4-large', dimensions: 1024, costPer1M: 0.12 },
+    // Legacy — kept for backward compatibility
+    'voyage-3':             { id: 'voyage-3',       dimensions: 1024, costPer1M: 0.06 },
+    'voyage-3-lite':        { id: 'voyage-3-lite',  dimensions: 512,  costPer1M: 0.02 },
+    // Multimodal
+    'voyage-multimodal-3.5':{ id: 'voyage-multimodal-3.5', dimensions: 1024, costPer1M: 0.12 },
+    'voyage-multimodal-3':  { id: 'voyage-multimodal-3',   dimensions: 1024, costPer1M: 0.12 },
   },
 };
 
@@ -79,62 +85,96 @@ export interface VoyageRequestItem {
   content: VoyageImageContent[];
 }
 
+// Shared retry/error loop for all Voyage endpoints
+async function callVoyageEndpoint<T>(
+  endpoint: string,
+  body: object,
+  validate: (json: unknown, inputLength: number) => T,
+  inputLength: number,
+  endpointName: string,
+  apiKey: string,
+  tenantId: string,
+  model: string,
+  extraLogFields?: Record<string, unknown>,
+): Promise<T> {
+  let attempt = 0;
+
+  while (true) {
+    let res: Response;
+    try {
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (attempt < MAX_RETRIES) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
+        attempt++;
+        continue;
+      }
+      throw new ProviderError(`${endpointName} provider unreachable`, 502);
+    }
+
+    if (res.status === 429 && attempt < MAX_RETRIES) {
+      const retryAfterHeader = res.headers.get('Retry-After');
+      const retryAfterSeconds = Number(retryAfterHeader);
+      const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? retryAfterSeconds * 1000
+        : retryAfterHeader
+          ? Math.max(0, Date.parse(retryAfterHeader) - Date.now())
+          : 2000;
+      await new Promise(r => setTimeout(r, retryAfterMs));
+      attempt++;
+      continue;
+    }
+
+    if (res.status === 429) {
+      // All retries exhausted — surface Retry-After to caller
+      const retryAfterHeader = res.headers.get('Retry-After');
+      const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
+      console.error(JSON.stringify({ event: 'provider.rate_limit', provider: VOYAGE.name, endpoint: endpointName, tenant_id: tenantId, model, retry_after: retryAfterSeconds, ...extraLogFields }));
+      throw new RateLimitError(
+        `Rate limit exceeded. ${Number.isFinite(retryAfterSeconds) ? `Retry after ${retryAfterSeconds}s.` : 'Please wait before retrying.'}`,
+        retryAfterSeconds,
+      );
+    }
+
+    if (res.status >= 500 && attempt < MAX_RETRIES) {
+      await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
+      attempt++;
+      continue;
+    }
+
+    if (!res.ok) {
+      console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: endpointName, status: res.status, tenant_id: tenantId, model, ...extraLogFields }));
+      throw new ProviderError(`${endpointName} provider error (${res.status})`, res.status);
+    }
+
+    return validate(await res.json(), inputLength);
+  }
+}
+
 export async function callTextProvider(
   inputs: string[],
   model: string,
   apiKey: string,
   tenantId: string,
-  attempt = 0
 ): Promise<TextProviderResponse> {
-  let res: Response;
-  try {
-    res = await fetch(VOYAGE.textEndpoint, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, input: inputs }),
-      signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
-    });
-  } catch (err) {
-    if (attempt < MAX_RETRIES) {
-      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-      return callTextProvider(inputs, model, apiKey, tenantId, attempt + 1);
-    }
-    throw new ProviderError('Embedding provider unreachable', 502);
-  }
-
-  if (res.status === 429 && attempt < MAX_RETRIES) {
-    const retryAfterHeader = res.headers.get('Retry-After');
-    const retryAfterSeconds = Number(retryAfterHeader);
-    const retryAfterMs = Number.isFinite(retryAfterSeconds)
-      ? retryAfterSeconds * 1000
-      : retryAfterHeader
-        ? Math.max(0, Date.parse(retryAfterHeader) - Date.now())
-        : 2000;
-    await new Promise(r => setTimeout(r, retryAfterMs));
-    return callTextProvider(inputs, model, apiKey, tenantId, attempt + 1);
-  }
-
-  if (res.status >= 500 && attempt < MAX_RETRIES) {
-    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-    return callTextProvider(inputs, model, apiKey, tenantId, attempt + 1);
-  }
-
-  if (!res.ok) {
-    console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'text', status: res.status, tenant_id: tenantId, model }));
-    throw new ProviderError(`Embedding provider error (${res.status})`, res.status);
-  }
-
-  const json = await res.json() as TextProviderResponse;
-  if (!json?.data || !Array.isArray(json.data) || json.data.length === 0) {
-    console.error(JSON.stringify({ event: 'provider.invalid_response', provider: VOYAGE.name, endpoint: 'text', tenant_id: tenantId, model }));
-    throw new ProviderError('Invalid response from embedding provider', 502);
-  }
-  if (json.data.length !== inputs.length) {
-    console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'text', tenant_id: tenantId, model, expected: inputs.length, received: json.data.length }));
-    throw new ProviderError('Partial response from embedding provider', 502);
-  }
-
-  return json;
+  return callVoyageEndpoint<TextProviderResponse>(
+    VOYAGE.textEndpoint,
+    { model, input: inputs },
+    (json) => {
+      const j = json as TextProviderResponse;
+      if (!j?.data || !Array.isArray(j.data) || j.data.length === 0) {
+        console.error(JSON.stringify({ event: 'provider.invalid_response', provider: VOYAGE.name, endpoint: 'text', tenant_id: tenantId, model }));
+        throw new ProviderError('Invalid response from embedding provider', 502);
+      }
+      return j;
+    },
+    inputs.length, 'text', apiKey, tenantId, model,
+  );
 }
 
 export async function callImageProvider(
@@ -142,57 +182,53 @@ export async function callImageProvider(
   model: string,
   apiKey: string,
   tenantId: string,
-  attempt = 0
 ): Promise<ImageProviderResponse> {
-  let res: Response;
-  try {
-    res = await fetch(VOYAGE.imageEndpoint, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, inputs }),
-      signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
-    });
-  } catch (err) {
-    if (attempt < MAX_RETRIES) {
-      await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-      return callImageProvider(inputs, model, apiKey, tenantId, attempt + 1);
-    }
-    throw new ProviderError('Image embedding provider unreachable', 502);
-  }
+  return callVoyageEndpoint<ImageProviderResponse>(
+    VOYAGE.imageEndpoint,
+    { model, inputs },
+    (json, inputLength) => {
+      const j = json as ImageProviderResponse;
+      if (!j?.data || !Array.isArray(j.data) || j.data.length === 0) {
+        console.error(JSON.stringify({ event: 'provider.invalid_response', provider: VOYAGE.name, endpoint: 'image', tenant_id: tenantId, model }));
+        throw new ProviderError('Invalid response from image embedding provider', 502);
+      }
+      if (j.data.length !== inputLength) {
+        console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'image', tenant_id: tenantId, model, expected: inputLength, received: j.data.length }));
+        throw new ProviderError('Partial response from image embedding provider', 502);
+      }
+      return j;
+    },
+    inputs.length, 'image', apiKey, tenantId, model,
+  );
+}
 
-  if (res.status === 429 && attempt < MAX_RETRIES) {
-    const retryAfterHeader = res.headers.get('Retry-After');
-    const retryAfterSeconds = Number(retryAfterHeader);
-    const retryAfterMs = Number.isFinite(retryAfterSeconds)
-      ? retryAfterSeconds * 1000
-      : retryAfterHeader
-        ? Math.max(0, Date.parse(retryAfterHeader) - Date.now())
-        : 2000;
-    await new Promise(r => setTimeout(r, retryAfterMs));
-    return callImageProvider(inputs, model, apiKey, tenantId, attempt + 1);
-  }
-
-  if (res.status >= 500 && attempt < MAX_RETRIES) {
-    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-    return callImageProvider(inputs, model, apiKey, tenantId, attempt + 1);
-  }
-
-  if (!res.ok) {
-    console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'image', status: res.status, tenant_id: tenantId, model }));
-    throw new ProviderError(`Image embedding provider error (${res.status})`, res.status);
-  }
-
-  const json = await res.json() as ImageProviderResponse;
-  if (!json?.data || !Array.isArray(json.data) || json.data.length === 0) {
-    console.error(JSON.stringify({ event: 'provider.invalid_response', provider: VOYAGE.name, endpoint: 'image', tenant_id: tenantId, model }));
-    throw new ProviderError('Invalid response from image embedding provider', 502);
-  }
-  if (json.data.length !== inputs.length) {
-    console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'image', tenant_id: tenantId, model, expected: inputs.length, received: json.data.length }));
-    throw new ProviderError('Partial response from image embedding provider', 502);
-  }
-
-  return json;
+async function callDocBatch(
+  batch: string[],
+  batchStart: number,
+  model: string,
+  apiKey: string,
+  tenantId: string,
+): Promise<{ embeddings: { index: number; embedding: number[] }[]; total_tokens: number }> {
+  const res = await callVoyageEndpoint<TextProviderResponse>(
+    VOYAGE.textEndpoint,
+    { model, input: batch },
+    (json, inputLength) => {
+      const j = json as TextProviderResponse;
+      if (!j?.data || !Array.isArray(j.data) || j.data.length === 0) {
+        throw new ProviderError('Invalid response from embedding provider', 502);
+      }
+      if (j.data.length !== inputLength) {
+        console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'doc', tenant_id: tenantId, model, expected: inputLength, received: j.data.length, batch_start: batchStart }));
+        throw new ProviderError('Partial response from embedding provider', 502);
+      }
+      return j;
+    },
+    batch.length, 'doc', apiKey, tenantId, model, { batch_start: batchStart },
+  );
+  return {
+    embeddings: res.data.map((item, j) => ({ index: batchStart + j, embedding: item.embedding })),
+    total_tokens: res.usage?.total_tokens ?? 0,
+  };
 }
 
 export async function callDocProvider(
@@ -201,69 +237,14 @@ export async function callDocProvider(
   apiKey: string,
   tenantId: string,
 ): Promise<DocProviderResponse> {
+  // Sequential batches — same 3 RPM limit as text endpoint, parallel would 429 immediately
   const result: DocProviderResponse = { embeddings: [], total_tokens: 0 };
 
   for (let i = 0; i < chunks.length; i += DOC_BATCH_SIZE) {
     const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-    let attempt = 0;
-
-    while (true) {
-      let res: Response;
-      try {
-        res = await fetch(VOYAGE.textEndpoint, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model, input: batch }),
-          signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
-        });
-      } catch (err) {
-        if (attempt < MAX_RETRIES) {
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
-          attempt++;
-          continue;
-        }
-        throw new ProviderError('Embedding provider unreachable', 502);
-      }
-
-      if (res.status === 429 && attempt < MAX_RETRIES) {
-        const retryAfterHeader = res.headers.get('Retry-After');
-        const retryAfterSeconds = Number(retryAfterHeader);
-        const retryAfterMs = Number.isFinite(retryAfterSeconds)
-          ? retryAfterSeconds * 1000
-          : retryAfterHeader
-            ? Math.max(0, Date.parse(retryAfterHeader) - Date.now())
-            : 2000;
-        await new Promise(r => setTimeout(r, retryAfterMs));
-        attempt++;
-        continue;
-      }
-
-      if (res.status >= 500 && attempt < MAX_RETRIES) {
-        await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
-        attempt++;
-        continue;
-      }
-
-      if (!res.ok) {
-        console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: 'doc', status: res.status, tenant_id: tenantId, model, batch_start: i }));
-        throw new ProviderError(`Embedding provider error (${res.status})`, res.status);
-      }
-
-      const json = await res.json() as TextProviderResponse;
-      if (!json?.data || !Array.isArray(json.data) || json.data.length === 0) {
-        throw new ProviderError('Invalid response from embedding provider', 502);
-      }
-      if (json.data.length !== batch.length) {
-        console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'doc', tenant_id: tenantId, model, expected: batch.length, received: json.data.length, batch_start: i }));
-        throw new ProviderError('Partial response from embedding provider', 502);
-      }
-
-      for (let j = 0; j < json.data.length; j++) {
-        result.embeddings.push({ index: i + j, embedding: json.data[j].embedding });
-      }
-      result.total_tokens += json.usage?.total_tokens ?? 0;
-      break;
-    }
+    const { embeddings, total_tokens } = await callDocBatch(batch, i, model, apiKey, tenantId);
+    result.embeddings.push(...embeddings);
+    result.total_tokens += total_tokens;
   }
 
   return result;

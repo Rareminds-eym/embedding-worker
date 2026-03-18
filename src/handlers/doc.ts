@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import type { Env, RequestContext } from '../types';
+import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
 import { resolveDocModel, callDocProvider, VOYAGE } from '../providers';
@@ -119,9 +119,7 @@ export async function handleDocEmbed(
 
   let binaryData: Uint8Array;
   try {
-    const binaryStr = atob(input.data as string);
-    binaryData = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) binaryData[i] = binaryStr.charCodeAt(i);
+    binaryData = Uint8Array.from(atob(input.data as string), c => c.charCodeAt(0));
   } catch {
     throw new ValidationError('input.data is not valid base64', ERROR_CODES.INVALID_INPUT);
   }
@@ -142,9 +140,9 @@ export async function handleDocEmbed(
       { conversionOptions: { pdf: { metadata: false } } }
     );
     const item = Array.isArray(results) ? results[0] : results;
-    if (!item) throw new WorkerError('Document conversion returned no result', ERROR_CODES.INTERNAL_ERROR, 500);
     conversionResult = item;
   } catch (err) {
+    if (err instanceof WorkerError || err instanceof ValidationError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const isTimeout = /timeout|timed out/i.test(msg);
     console.error(JSON.stringify({ event: 'toMarkdown.error', tenant_id: ctx.tenantId, filename, mimeType, error: msg }));
@@ -157,9 +155,14 @@ export async function handleDocEmbed(
     );
   }
 
+  if (!conversionResult) throw new WorkerError('Document conversion returned no result', ERROR_CODES.INTERNAL_ERROR, 500);
+
   if (conversionResult.format === 'error' || !conversionResult.data) {
+    if (conversionResult.error) {
+      console.error(JSON.stringify({ event: 'toMarkdown.format_error', tenant_id: ctx.tenantId, filename, mimeType, detail: conversionResult.error }));
+    }
     throw new ValidationError(
-      `Document could not be converted: ${conversionResult.error ?? 'unknown error'}. Ensure the file is not password-protected or corrupted.`,
+      'Document could not be converted. Ensure the file is not password-protected, corrupted, or empty.',
       ERROR_CODES.INVALID_INPUT
     );
   }
@@ -188,6 +191,16 @@ export async function handleDocEmbed(
   let pagesDetected: number | undefined;
   let pagesProcessed: number | undefined;
 
+  const maxProcessableChars = DOC_MAX_CHUNKS * (DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP);
+
+  // Early rejection when no page limit is set — avoids allocating limitToPages on oversized docs
+  if (maxPages === undefined && markdown.length > maxProcessableChars) {
+    throw new ValidationError(
+      `Document too large: ${markdown.length} chars exceeds maximum of ${maxProcessableChars}. Split the document and send in parts.`,
+      ERROR_CODES.INVALID_INPUT
+    );
+  }
+
   if (maxPages !== undefined) {
     const pageResult = limitToPages(markdown, maxPages);
     processedMarkdown = pageResult.text;
@@ -198,7 +211,6 @@ export async function handleDocEmbed(
     }
   }
 
-  const maxProcessableChars = DOC_MAX_CHUNKS * (DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP);
   if (processedMarkdown.length > maxProcessableChars) {
     throw new ValidationError(
       `Document too large: ${processedMarkdown.length} chars exceeds maximum of ${maxProcessableChars}. Split the document and send in parts.`,
@@ -219,9 +231,12 @@ export async function handleDocEmbed(
   const totalTokens = result.total_tokens;
   const estimatedCost = ((totalTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);
 
+  const latency_ms = Date.now() - ctx.startTime;
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: modelConfig.id, chunks: chunks.length }));
+
   return jsonOk({
     success: true,
-    embeddings: result.embeddings.map(item => ({
+    embeddings: result.embeddings.map((item): EmbeddingItem => ({
       index: item.index,
       embedding: item.embedding,
       dimensions: item.embedding.length,
@@ -242,6 +257,6 @@ export async function handleDocEmbed(
       estimated_cost_usd: estimatedCost,
     },
     request_id: ctx.requestId,
-    latency_ms: Date.now() - ctx.startTime,
+    latency_ms,
   }, 200, request, env);
 }

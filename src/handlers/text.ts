@@ -4,7 +4,7 @@ import type { Env, RequestContext } from '../types';
 import { ValidationError } from '../types';
 import { jsonOk } from '../utils/response';
 import { resolveModel, callTextProvider, VOYAGE } from '../providers';
-import { MAX_INPUT_CHARS, MAX_REQUEST_BODY_SIZE, ERROR_CODES } from '../constants';
+import { MAX_REQUEST_BODY_SIZE, ERROR_CODES, TEXT_MAX_CHARS } from '../constants';
 
 const SKIP_KEYS = new Set([
   'created_at', 'updated_at', 'createdAt', 'updatedAt',
@@ -18,8 +18,7 @@ function shouldSkip(key: string): boolean {
 function tryParseJsonString(v: string): unknown | null {
   const trimmed = v.trimStart();
   if (trimmed[0] !== '{' && trimmed[0] !== '[') return null;
-  try { return JSON.parse(v); }
-  catch { return null; }
+  try { return JSON.parse(v); } catch { return null; }
 }
 
 function extractText(value: unknown, key?: string): string {
@@ -33,11 +32,10 @@ function extractText(value: unknown, key?: string): string {
     return key ? `${key}: ${v}` : v;
   }
 
-  if (typeof value === 'number') {
-    return key ? `${key}: ${value}` : String(value);
-  }
+  if (typeof value === 'number') return key ? `${key}: ${value}` : String(value);
 
   if (typeof value === 'boolean') {
+    // false intentionally omitted — carries no semantic signal for embeddings
     if (!value) return '';
     return key ? `${key}: ${value}` : String(value);
   }
@@ -58,15 +56,9 @@ function extractText(value: unknown, key?: string): string {
   return '';
 }
 
-const SAFE_CHAR_LIMIT = 24_000;
-
-function normalizeInput(input: unknown): { text: string; truncated: boolean } {
-  if (typeof input === 'string') return { text: input.trim(), truncated: false };
-  const text = extractText(input).replace(/\s+/g, ' ').trim();
-  if (text.length > SAFE_CHAR_LIMIT) {
-    return { text: text.slice(0, SAFE_CHAR_LIMIT).trimEnd(), truncated: true };
-  }
-  return { text, truncated: false };
+function normalizeInput(input: unknown): string {
+  if (typeof input === 'string') return input.trim();
+  return extractText(input).replace(/\s+/g, ' ').trim();
 }
 
 export async function handleTextEmbed(
@@ -88,6 +80,18 @@ export async function handleTextEmbed(
     throw new ValidationError('Missing required field: input', ERROR_CODES.INVALID_INPUT);
   }
 
+  if (Array.isArray(body.input)) {
+    if (body.input.length === 0) {
+      throw new ValidationError('Input array must not be empty', ERROR_CODES.INVALID_INPUT);
+    }
+    // Normalize each item (string or object) then join into one string — single Voyage call
+    const parts = (body.input as unknown[]).map(item => normalizeInput(item)).filter(Boolean);
+    if (parts.length === 0) {
+      throw new ValidationError('Input array produced no embeddable text', ERROR_CODES.INVALID_INPUT);
+    }
+    body.input = parts.join(' ');
+  }
+
   const modelKey = typeof body.model === 'string' ? body.model : undefined;
   if (modelKey && !VOYAGE.textModelKeys.includes(modelKey)) {
     throw new ValidationError(
@@ -96,40 +100,42 @@ export async function handleTextEmbed(
     );
   }
 
-  const { text: input, truncated } = normalizeInput(body.input);
+  const text = normalizeInput(body.input);
 
-  if (input.trim().length === 0) {
+  if (text.length === 0) {
     throw new ValidationError('Input cannot be empty', ERROR_CODES.INVALID_INPUT);
   }
 
-  if (input.length > MAX_INPUT_CHARS) {
+  if (text.length > TEXT_MAX_CHARS) {
     throw new ValidationError(
-      `Input exceeds maximum of ${MAX_INPUT_CHARS} characters`,
+      `Input exceeds maximum of ${TEXT_MAX_CHARS} characters (~30,000 tokens). Truncate or summarize your input.`,
       ERROR_CODES.INVALID_INPUT
     );
   }
 
   if (env.ENVIRONMENT !== 'production') {
-    console.debug(`[text-embed] tenant=${ctx.tenantId} req=${ctx.requestId} chars=${input.length}`);
+    console.debug(`[text-embed] tenant=${ctx.tenantId} req=${ctx.requestId} chars=${text.length}`);
   }
 
   const modelConfig = resolveModel(modelKey);
-  const result = await callTextProvider([input], modelConfig.id, env.VOYAGE_API_KEY, ctx.tenantId);
-  const embedding: number[] = result.data[0].embedding;
+  const result = await callTextProvider([text], modelConfig.id, env.VOYAGE_API_KEY, ctx.tenantId);
+  const embedding = result.data[0].embedding;
   const promptTokens = result.usage?.total_tokens ?? 0;
   const estimatedCost = ((promptTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);
+
+  const latency_ms = Date.now() - ctx.startTime;
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', tenant_id: ctx.tenantId, tokens: promptTokens, latency_ms, model: modelConfig.id }));
 
   return jsonOk({
     success: true,
     embedding,
     model: modelConfig.id,
     dimensions: embedding.length,
-    ...(truncated && { truncated: true }),
     usage: {
       total_tokens: promptTokens,
       estimated_cost_usd: estimatedCost,
     },
     request_id: ctx.requestId,
-    latency_ms: Date.now() - ctx.startTime,
+    latency_ms,
   }, 200, request, env);
 }

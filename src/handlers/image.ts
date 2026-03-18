@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import type { Env, RequestContext } from '../types';
+import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError } from '../types';
 import { jsonOk } from '../utils/response';
 import { resolveImageModel, callImageProvider, VoyageRequestItem, VOYAGE } from '../providers';
@@ -36,6 +36,10 @@ function normalizeInput(input: unknown): ImageInput[] {
         const parsed = new URL(obj.data as string);
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           throw new ValidationError('input.data URL must use http or https scheme', ERROR_CODES.INVALID_INPUT);
+        }
+        const PRIVATE_HOST = /^(localhost|127\.|10\.\d+\.\d+\.\d+|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/;
+        if (PRIVATE_HOST.test(parsed.hostname)) {
+          throw new ValidationError('Private or internal URLs are not permitted', ERROR_CODES.INVALID_INPUT);
         }
       } catch (e) {
         if (e instanceof ValidationError) throw e;
@@ -105,11 +109,14 @@ export async function handleImageEmbed(
   const totalTokens = result.usage?.total_tokens ?? 0;
   const estimatedCost = ((totalTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);
 
-  const embeddings = result.data.map(item => ({
+  const embeddings: EmbeddingItem[] = result.data.map(item => ({
     index: item.index,
     embedding: item.embedding,
     dimensions: item.embedding.length,
   }));
+
+  const latency_ms = Date.now() - ctx.startTime;
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'image', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: modelConfig.id, count: embeddings.length }));
 
   return jsonOk({
     success: true,
@@ -123,6 +130,6 @@ export async function handleImageEmbed(
       estimated_cost_usd: estimatedCost,
     },
     request_id: ctx.requestId,
-    latency_ms: Date.now() - ctx.startTime,
+    latency_ms,
   }, 200, request, env);
 }

@@ -2,7 +2,6 @@
 
 export const API_VERSION = '1.0.0';
 
-export const MAX_INPUT_CHARS = 32000;
 export const MAX_REQUEST_BODY_SIZE = 1_000_000;
 
 export const MAX_IMAGE_BATCH_SIZE = 5;
@@ -26,9 +25,11 @@ export const DOC_CHARS_PER_PAGE = 3_000;
 export const DOC_MIN_CONTENT_CHARS = 50;
 export const DOC_BATCH_SIZE = 10;
 
+export const TEXT_MAX_CHARS = 120_000; // ~30K tokens — respects Voyage 32K token context window
+
 export const VOYAGE_TIMEOUT_MS = 30_000;
-export const RETRY_DELAY_MS = 500;
-export const MAX_RETRIES = 1;
+export const RETRY_DELAY_MS = 1_000;
+export const MAX_RETRIES = 3;
 
 export const CORS_MAX_AGE = 86400;
 

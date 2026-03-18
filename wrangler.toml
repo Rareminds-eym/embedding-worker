@@ -7,35 +7,51 @@ compatibility_flags = ["nodejs_compat"]
 port = 9004
 inspector_port = 9230
 
-[[kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_LOCAL_KV_ID"
+[observability]
+enabled = true
 
+# ============================================================================
+# LOCAL  →  wrangler dev  (uses preview_id for KV, secrets from .dev.vars)
+# ============================================================================
 [ai]
 binding = "AI"
 
-# ═══════════════════════════════════════════════════════════
-# DEVELOPMENT
-# ═══════════════════════════════════════════════════════════
-[env.development]
-name = "embedding-worker-dev"
+[vars]
+ENVIRONMENT = "local"
+ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788"
 
-[env.development.vars]
+[[kv_namespaces]]
+binding = "EMBEDDING_KV"
+id = "REPLACE_WITH_PRODUCTION_KV_ID"
+preview_id = "REPLACE_WITH_LOCAL_KV_ID"
+
+# wrangler secret put ADMIN_KEY
+# wrangler secret put VOYAGE_API_KEY
+
+# ============================================================================
+# DEVELOPMENT  →  wrangler deploy --env dev
+# ============================================================================
+[env.dev]
+[env.dev.ai]
+binding = "AI"
+
+[env.dev.vars]
 ENVIRONMENT = "development"
 ALLOWED_ORIGINS = "https://dev.skillpassports.com"
 
-[[env.development.kv_namespaces]]
+[[env.dev.kv_namespaces]]
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_DEV_KV_ID"
 
-# wrangler secret put ADMIN_KEY          --env development
-# wrangler secret put VOYAGE_API_KEY     --env development
+# wrangler secret put ADMIN_KEY      --env dev
+# wrangler secret put VOYAGE_API_KEY --env dev
 
-# ═══════════════════════════════════════════════════════════
-# STAGING
-# ═══════════════════════════════════════════════════════════
+# ============================================================================
+# STAGING  →  wrangler deploy --env staging
+# ============================================================================
 [env.staging]
-name = "embedding-worker-staging"
+[env.staging.ai]
+binding = "AI"
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
@@ -45,14 +61,15 @@ ALLOWED_ORIGINS = "https://stag.skillpassports.com"
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_STAGING_KV_ID"
 
-# wrangler secret put ADMIN_KEY          --env staging
-# wrangler secret put VOYAGE_API_KEY     --env staging
+# wrangler secret put ADMIN_KEY      --env staging
+# wrangler secret put VOYAGE_API_KEY --env staging
 
-# ═══════════════════════════════════════════════════════════
-# PRODUCTION
-# ═══════════════════════════════════════════════════════════
+# ============================================================================
+# PRODUCTION  →  wrangler deploy --env production
+# ============================================================================
 [env.production]
-name = "embedding-worker-production"
+[env.production.ai]
+binding = "AI"
 
 [env.production.vars]
 ENVIRONMENT = "production"
@@ -62,5 +79,5 @@ ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_PRODUCTION_KV_ID"
 
-# wrangler secret put ADMIN_KEY          --env production
-# wrangler secret put VOYAGE_API_KEY     --env production
+# wrangler secret put ADMIN_KEY      --env production
+# wrangler secret put VOYAGE_API_KEY --env production

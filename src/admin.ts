@@ -21,7 +21,10 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
   if (!body?.id) throw new ValidationError('Missing required field: id', ERROR_CODES.INVALID_INPUT);
   if (!body?.name) throw new ValidationError('Missing required field: name', ERROR_CODES.INVALID_INPUT);
 
-  const tenantId = body.id.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  if (!/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(body.id)) {
+    throw new ValidationError('id must be lowercase alphanumeric with hyphens, 2–64 chars, and cannot start or end with a hyphen', ERROR_CODES.INVALID_INPUT);
+  }
+  const tenantId = body.id;
 
   const existing = await env.EMBEDDING_KV.get(`tenant:${tenantId}`);
   if (existing) {
@@ -54,9 +57,11 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
 
 // GET /admin/tenant?id=xxx
 async function getTenant(request: Request, env: Env): Promise<Response> {
-  const raw_id = new URL(request.url).searchParams.get('id');
-  if (!raw_id) throw new ValidationError('Missing query param: id', ERROR_CODES.INVALID_INPUT);
-  const id = raw_id.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  const id = new URL(request.url).searchParams.get('id');
+  if (!id) throw new ValidationError('Missing query param: id', ERROR_CODES.INVALID_INPUT);
+  if (!/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(id)) {
+    throw new ValidationError('id must be lowercase alphanumeric with hyphens, 2–64 chars', ERROR_CODES.INVALID_INPUT);
+  }
 
   const raw = await env.EMBEDDING_KV.get(`tenant:${id}`);
   if (!raw) throw new WorkerError(`Tenant '${id}' not found`, ERROR_CODES.NOT_FOUND, 404);
@@ -67,33 +72,62 @@ async function getTenant(request: Request, env: Env): Promise<Response> {
 
 // GET /admin/tenants
 async function listTenants(request: Request, env: Env): Promise<Response> {
-  const list = await env.EMBEDDING_KV.list({ prefix: 'tenant:' });
+  // Paginate through all keys to avoid silent truncation at 1000
+  let cursor: string | undefined;
+  const allKeys: string[] = [];
+  do {
+    const page = await env.EMBEDDING_KV.list({ prefix: 'tenant:', limit: 100, cursor });
+    allKeys.push(...page.keys.map(k => k.name));
+    cursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
+  } while (cursor);
 
-  const tenants = await Promise.all(
-    list.keys.map(async ({ name }) => {
-      const raw = await env.EMBEDDING_KV.get(name);
-      if (!raw) return null;
+  // Fetch values in batches of 100 to stay within subrequest budget
+  const tenants: { tenant_id: string; name: string; created_at: string }[] = [];
+  for (let i = 0; i < allKeys.length; i += 100) {
+    const batch = allKeys.slice(i, i + 100);
+    const values = await Promise.all(batch.map(name => env.EMBEDDING_KV.get(name)));
+    for (let j = 0; j < batch.length; j++) {
+      const raw = values[j];
+      if (!raw) continue;
       const config: TenantConfig = JSON.parse(raw);
-      return {
-        tenant_id: name.replace('tenant:', ''),
+      tenants.push({
+        tenant_id: batch[j].replace('tenant:', ''),
         name: config.name,
         created_at: config.created_at,
-      };
-    })
-  );
+      });
+    }
+  }
 
-  const filtered = tenants.filter(Boolean);
-  return jsonOk({ success: true, tenants: filtered, total: filtered.length }, 200, request, env);
+  return jsonOk({ success: true, tenants, total: tenants.length }, 200, request, env);
 }
 
 // DELETE /admin/tenant?id=xxx
 async function deleteTenant(request: Request, env: Env): Promise<Response> {
-  const raw_id = new URL(request.url).searchParams.get('id');
-  if (!raw_id) throw new ValidationError('Missing query param: id', ERROR_CODES.INVALID_INPUT);
-  const id = raw_id.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  const id = new URL(request.url).searchParams.get('id');
+  if (!id) throw new ValidationError('Missing query param: id', ERROR_CODES.INVALID_INPUT);
+  if (!/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(id)) {
+    throw new ValidationError('id must be lowercase alphanumeric with hyphens, 2–64 chars', ERROR_CODES.INVALID_INPUT);
+  }
 
   const existing = await env.EMBEDDING_KV.get(`tenant:${id}`);
   if (!existing) throw new WorkerError(`Tenant '${id}' not found`, ERROR_CODES.NOT_FOUND, 404);
+
+  // Remove all API keys belonging to this tenant before deleting the tenant record
+  let cursor: string | undefined;
+  const keyNames: string[] = [];
+  do {
+    const page = await env.EMBEDDING_KV.list({ prefix: 'api_keys:', limit: 100, cursor });
+    keyNames.push(...page.keys.map(k => k.name));
+    cursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
+  } while (cursor);
+
+  await Promise.all(keyNames.map(async name => {
+    const raw = await env.EMBEDDING_KV.get(name);
+    if (raw) {
+      const rec: ApiKeyRecord = JSON.parse(raw);
+      if (rec.tenant_id === id) await env.EMBEDDING_KV.delete(name);
+    }
+  }));
 
   await env.EMBEDDING_KV.delete(`tenant:${id}`);
   return jsonOk({ success: true, message: `Tenant '${id}' deleted` }, 200, request, env);

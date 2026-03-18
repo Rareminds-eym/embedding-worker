@@ -26,6 +26,12 @@ export interface RequestContext {
   startTime: number;
 }
 
+export interface EmbeddingItem {
+  index: number;
+  embedding: number[];
+  dimensions: number;
+}
+
 // ── Error classes ──────────────────────────────────────────
 
 export class AuthError extends Error {
@@ -46,6 +52,13 @@ export class ProviderError extends Error {
   constructor(message: string, public status: number) {
     super(message);
     this.name = 'ProviderError';
+  }
+}
+
+export class RateLimitError extends Error {
+  constructor(message: string, public retryAfterSeconds?: number) {
+    super(message);
+    this.name = 'RateLimitError';
   }
 }
 
