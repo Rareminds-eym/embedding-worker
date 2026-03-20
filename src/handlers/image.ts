@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import type { Env, RequestContext, EmbeddingItem } from '../types';
-import { ValidationError } from '../types';
+import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
 import { resolveImageModel, callImageProvider, VoyageRequestItem, VOYAGE } from '../providers';
 import {
@@ -10,6 +10,7 @@ import {
   ALLOWED_IMAGE_MEDIA_TYPES,
   ERROR_CODES,
 } from '../constants';
+import { checkRateLimit } from '../utils/ratelimit';
 
 type AllowedMediaType = typeof ALLOWED_IMAGE_MEDIA_TYPES[number];
 
@@ -37,8 +38,12 @@ function normalizeInput(input: unknown): ImageInput[] {
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           throw new ValidationError('input.data URL must use http or https scheme', ERROR_CODES.INVALID_INPUT);
         }
-        const PRIVATE_HOST = /^(localhost|127\.|10\.\d+\.\d+\.\d+|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/;
-        if (PRIVATE_HOST.test(parsed.hostname)) {
+        const PRIVATE_HOST = /^(localhost|0\.0\.0\.0|127\.|10\.\d+\.\d+\.\d+|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|metadata\.google|fc00|fd00|fe80|\[::1\]|\[::ffff:)/i;
+        if (
+          PRIVATE_HOST.test(parsed.hostname) ||
+          parsed.hostname.endsWith('.internal') ||
+          parsed.hostname.endsWith('.local')
+        ) {
           throw new ValidationError('Private or internal URLs are not permitted', ERROR_CODES.INVALID_INPUT);
         }
       } catch (e) {
@@ -78,7 +83,10 @@ export async function handleImageEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
-  const bodyText = await request.text().catch(() => '');
+  const bodyText = await request.text().catch((err) => {
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'image', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+    throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
+  });
   if (bodyText.length > MAX_IMAGE_REQUEST_BODY_SIZE) {
     throw new ValidationError('Request body too large', ERROR_CODES.INVALID_INPUT);
   }
@@ -105,6 +113,7 @@ export async function handleImageEmbed(
     );
   }
   const modelConfig = resolveImageModel(modelKey);
+  await checkRateLimit(ctx.tenantId, 'image', env);
   const result = await callImageProvider(buildVoyageInputs(inputs), modelConfig.id, env.VOYAGE_API_KEY, ctx.tenantId);
   const totalTokens = result.usage?.total_tokens ?? 0;
   const estimatedCost = ((totalTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);
@@ -116,7 +125,7 @@ export async function handleImageEmbed(
   }));
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'image', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: modelConfig.id, count: embeddings.length }));
+  console.error(JSON.stringify({ event: 'embed.success', endpoint: 'image', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: modelConfig.id, count: embeddings.length }));
 
   return jsonOk({
     success: true,
@@ -131,5 +140,5 @@ export async function handleImageEmbed(
     },
     request_id: ctx.requestId,
     latency_ms,
-  }, 200, request, env);
+  }, 200, request, env, ctx.requestId);
 }

@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import type { Env, RequestContext, TenantConfig, ApiKeyRecord } from './types';
+import type { Env, RequestContext, ApiKeyRecord } from './types';
 import { AuthError } from './types';
 import { sha256 } from './utils/hash';
 // Bearer sk_<48 lowercase hex chars>
@@ -23,17 +23,22 @@ export async function authenticate(request: Request, env: Env, requestId: string
     throw new AuthError('Invalid API key', 'UNAUTHORIZED');
   }
 
-  const keyRecord: ApiKeyRecord = JSON.parse(keyRaw);
-  const tenantRaw = await env.EMBEDDING_KV.get(`tenant:${keyRecord.tenant_id}`);
-  if (!tenantRaw) {
+  let keyRecord: ApiKeyRecord;
+  try {
+    keyRecord = JSON.parse(keyRaw);
+  } catch {
+    console.error(JSON.stringify({ event: 'auth.corrupt_key_record', hash }));
+    throw new AuthError('Invalid API key', 'UNAUTHORIZED');
+  }
+
+  // Verify the tenant record still exists (guards against deleted tenants with live keys)
+  const tenantExists = await env.EMBEDDING_KV.get(`tenant:${keyRecord.tenant_id}`, { type: 'text', cacheTtl: 60 });
+  if (!tenantExists) {
     throw new AuthError('Tenant not found', 'UNAUTHORIZED');
   }
 
-  const tenant: TenantConfig = JSON.parse(tenantRaw);
-
   return {
     tenantId: keyRecord.tenant_id,
-    tenant,
     requestId,
     startTime: Date.now(),
   };
@@ -41,11 +46,19 @@ export async function authenticate(request: Request, env: Env, requestId: string
 
 export async function authenticateAdmin(request: Request, env: Env): Promise<void> {
   const key = request.headers.get('X-Admin-Key') ?? '';
+  const expected = env.ADMIN_KEY ?? '';
+  // Fail-closed: reject immediately if either side is empty
+  if (key.length === 0 || expected.length === 0) {
+    throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
+  }
+  // Hash both sides with SHA-256 — always 32-byte output, safe for timingSafeEqual.
+  // No HMAC key needed: the goal is purely constant-time comparison, not MAC authentication.
   const enc = new TextEncoder();
-  const a = enc.encode(key.padEnd(64));
-  const b = enc.encode((env.ADMIN_KEY ?? '').padEnd(64));
-  const match = await crypto.subtle.timingSafeEqual(a, b);
-  if (!match || key.length === 0) {
+  const [hashA, hashB] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(key)),
+    crypto.subtle.digest('SHA-256', enc.encode(expected)),
+  ]);
+  if (!(await crypto.subtle.timingSafeEqual(hashA, hashB))) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
   }
 }

@@ -7,6 +7,12 @@
  *
  * Override defaults via env vars:
  *   API_URL=https://embedding-worker.workers.dev API_KEY=sk_... npx tsx scripts/test-embed.ts
+ *
+ * Note: Rate limiting tests are not included as they require 30+ requests per endpoint
+ * and would significantly slow down the test suite. To test rate limits manually:
+ *   - Text endpoint: 30 req/min per tenant
+ *   - Image endpoint: 15 req/min per tenant
+ *   - Doc endpoint: 10 req/min per tenant
  */
 
 const API_URL = process.env.API_URL || 'http://127.0.0.1:9004';
@@ -73,8 +79,12 @@ async function testTextEmbed() {
   {
     const res = await post('/embeddings/text', { input: 'Software engineer with 5 years of React experience' }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.embedding)) pass(`plain string → embedding (model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''})`);
-    else fail('plain string', data);
+    if (res.ok && Array.isArray(data.embedding)) {
+      const emb = data.embedding as number[];
+      if (typeof data.dimensions === 'number' && emb.length !== data.dimensions)
+        fail(`plain string → dimensions mismatch: declared=${data.dimensions} actual=${emb.length}`);
+      else pass(`plain string → embedding (model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''})`);
+    } else fail('plain string', data);
   }
 
   // Object input
@@ -125,6 +135,37 @@ async function testTextEmbed() {
     else fail('model override', data);
   }
 
+  // X-Request-ID passthrough
+  {
+    const customRequestId = 'test-request-id-12345';
+    const res = await fetch(`${API_URL}/embeddings/text`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'application/json',
+        'X-Request-ID': customRequestId,
+      },
+      body: JSON.stringify({ input: 'test' }),
+    });
+    const data = await res.json() as Record<string, unknown>;
+    if (res.ok && data.request_id === customRequestId) pass('X-Request-ID passthrough → echoed back');
+    else fail('X-Request-ID passthrough', data);
+  }
+
+  // Content-Type enforcement
+  {
+    const res = await fetch(`${API_URL}/embeddings/text`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${API_KEY}`,
+        'Content-Type': 'text/plain',
+      },
+      body: JSON.stringify({ input: 'test' }),
+    });
+    if (res.status === 415) pass('wrong Content-Type → 415');
+    else fail('wrong Content-Type should be 415', await res.json());
+  }
+
   // Validation-only (no provider calls)
   {
     const res = await post('/embeddings/text', { input: 'hello', model: 'gpt-4' }, 'bearer');
@@ -169,6 +210,17 @@ async function testImageEmbed() {
     const data = await res.json() as Record<string, unknown>;
     if (res.ok && Array.isArray(data.embedding)) pass('single URL → embedding');
     else fail('single URL', data);
+  }
+
+  // Model override
+  {
+    const res = await post('/embeddings/image', {
+      input: { type: 'url', data: 'https://www.gstatic.com/webp/gallery/1.jpg' },
+      model: 'voyage-multimodal-3',
+    }, 'bearer');
+    const data = await res.json() as Record<string, unknown>;
+    if (res.ok && data.model === 'voyage-multimodal-3') pass(`model override → ${data.model}`);
+    else fail('model override', data);
   }
 
   // Invalid URL scheme
@@ -245,14 +297,14 @@ async function testDocEmbed() {
     } else fail('PDF embed', data);
   }
 
-  // With model override
+  // With model override — single-chunk doc uses Voyage directly, so model should match
   {
     const res = await post('/embeddings/doc', {
       input: { mimeType: 'application/pdf', data: pdfBase64 },
       model: 'voyage-4-lite',
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && (data.model === 'voyage-4-lite' || data.fallback_provider === 'openai')) pass(`model override → ${data.model}`);
+    if (res.ok && data.model === 'voyage-4-lite') pass(`model override → ${data.model}`);
     else fail('model override', data);
   }
 
@@ -346,14 +398,33 @@ async function testAdminRoutes() {
     else fail('GET /admin/tenant', data);
   }
 
+  // Get nonexistent tenant
+  {
+    const res = await fetch(`${API_URL}/admin/tenant?id=nonexistent-tenant-xyz`, {
+      headers: { 'X-Admin-Key': ADMIN_KEY },
+    });
+    if (res.status === 404) pass('GET /admin/tenant (nonexistent) → 404');
+    else fail('GET /admin/tenant (nonexistent) should be 404', await res.json());
+  }
+
   // List tenants
   {
     const res = await fetch(`${API_URL}/admin/tenants`, {
       headers: { 'X-Admin-Key': ADMIN_KEY },
     });
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.tenants)) pass('GET /admin/tenants → list');
+    if (res.ok && Array.isArray(data.tenants) && typeof data.total === 'number') pass('GET /admin/tenants → list with total');
     else fail('GET /admin/tenants', data);
+  }
+
+  // List tenants with pagination
+  {
+    const res = await fetch(`${API_URL}/admin/tenants?limit=1`, {
+      headers: { 'X-Admin-Key': ADMIN_KEY },
+    });
+    const data = await res.json() as Record<string, unknown>;
+    if (res.ok && Array.isArray(data.tenants)) pass('GET /admin/tenants?limit=1 → paginated');
+    else fail('GET /admin/tenants?limit=1', data);
   }
 
   // Duplicate tenant
@@ -370,6 +441,17 @@ async function testAdminRoutes() {
     else fail('invalid tenant ID should be 400', await res.json());
   }
 
+  // Wrong HTTP method on admin route
+  {
+    const res = await fetch(`${API_URL}/admin/tenant`, {
+      method: 'PUT',
+      headers: { 'X-Admin-Key': ADMIN_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'test', name: 'Test' }),
+    });
+    if (res.status === 405) pass('PUT /admin/tenant → 405');
+    else fail('PUT /admin/tenant should be 405', await res.json());
+  }
+
   // Wrong admin key
   {
     const res = await fetch(`${API_URL}/admin/tenants`, {
@@ -377,6 +459,13 @@ async function testAdminRoutes() {
     });
     if (res.status === 401) pass('wrong admin key → 401');
     else fail('wrong admin key should be 401', await res.json());
+  }
+
+  // Delete nonexistent tenant
+  {
+    const res = await del(`/admin/tenant?id=nonexistent-tenant-xyz`);
+    if (res.status === 404) pass('DELETE /admin/tenant (nonexistent) → 404');
+    else fail('DELETE /admin/tenant (nonexistent) should be 404', await res.json());
   }
 }
 

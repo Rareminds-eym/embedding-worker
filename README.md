@@ -152,12 +152,21 @@ X-Admin-Key: <value>
 
 ## Provider Fallback
 
-If Voyage AI fails (rate limit or any error), the text and doc endpoints automatically retry using OpenAI (`text-embedding-3-small`) via OpenRouter — no action needed from the caller.
+The worker uses OpenAI (`text-embedding-3-small`) via OpenRouter as a fallback provider in the following scenarios:
 
-- Fallback is triggered on `429` (rate limit) or any `ProviderError`
+**Text endpoint:**
+- Fallback is triggered on `429` (rate limit) or any `ProviderError` from Voyage AI
 - Only works if `OPENAI_API_KEY` is set in secrets
-- Image endpoint has no fallback (OpenAI does not support image embeddings)
 - When fallback is used, the response includes `"fallback_provider": "openai"` and dimensions will be `1536` instead of `1024`
+
+**Doc endpoint:**
+- Single-chunk documents: Same fallback behavior as text endpoint (Voyage primary, OpenAI on failure)
+- Multi-chunk documents (>1 chunk): Routes directly to OpenAI to guarantee uniform embedding dimensions across all chunks. If `OPENAI_API_KEY` is not set, returns `503 Service Unavailable`
+- When OpenAI is used (fallback or multi-chunk), the response includes `"fallback_provider": "openai"` and dimensions will be `1536` instead of `1024`
+
+**Image endpoint:**
+- No fallback available (OpenAI does not support image embeddings)
+- Always uses Voyage AI
 
 ```json
 {

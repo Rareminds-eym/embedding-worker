@@ -17,6 +17,8 @@ export function getCorsHeaders(request: Request, env?: Env): Record<string, stri
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Key',
     'Access-Control-Max-Age': String(CORS_MAX_AGE),
+    'Vary': 'Origin',
+    'Cache-Control': 'no-store',
   };
   if (allowedOrigins.includes(origin)) {
     headers['Access-Control-Allow-Origin'] = origin;
@@ -24,9 +26,10 @@ export function getCorsHeaders(request: Request, env?: Env): Record<string, stri
   return headers;
 }
 
-export function jsonOk(data: unknown, status = 200, request?: Request, env?: Env): Response {
+export function jsonOk(data: unknown, status = 200, request?: Request, env?: Env, requestId?: string): Response {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (request) Object.assign(headers, getCorsHeaders(request, env));
+  if (requestId) headers['X-Request-ID'] = requestId;
   return new Response(JSON.stringify(data), { status, headers });
 }
 
@@ -39,7 +42,7 @@ export function jsonError(
   extra?: Record<string, unknown>,
   env?: Env
 ): Response {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Request-ID': requestId };
   if (request) Object.assign(headers, getCorsHeaders(request, env));
   return new Response(
     JSON.stringify({ success: false, errorCode: code, message, request_id: requestId, ...extra }),
@@ -48,7 +51,7 @@ export function jsonError(
 }
 
 export function handleError(err: unknown, requestId: string, request?: Request, env?: Env): Response {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Request-ID': requestId };
   if (request) Object.assign(headers, getCorsHeaders(request, env));
 
   if (err instanceof AuthError) {
@@ -86,9 +89,11 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
     );
   }
 
-  const message = err instanceof Error ? err.message : 'Internal server error';
+  if (err instanceof Error) {
+    console.error(JSON.stringify({ event: 'unhandled_error', request_id: requestId, message: err.message, stack: err.stack }));
+  }
   return new Response(
-    JSON.stringify({ success: false, errorCode: ERROR_CODES.INTERNAL_ERROR, message, request_id: requestId }),
+    JSON.stringify({ success: false, errorCode: ERROR_CODES.INTERNAL_ERROR, message: 'Internal server error', request_id: requestId }),
     { status: 500, headers }
   );
 }

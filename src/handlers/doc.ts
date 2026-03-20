@@ -3,7 +3,7 @@
 import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { resolveDocModel, callDocProvider, VOYAGE } from '../providers';
+import { resolveModel, callDocProvider, VOYAGE } from '../providers';
 import {
   MAX_DOC_REQUEST_BODY_SIZE,
   MAX_DOC_BINARY_SIZE,
@@ -16,6 +16,7 @@ import {
   DOC_MIN_CONTENT_CHARS,
   ERROR_CODES,
 } from '../constants';
+import { checkRateLimit } from '../utils/ratelimit';
 import type { AllowedDocMimeType } from '../constants';
 
 function limitToPages(markdown: string, maxPages: number): { text: string; pagesDetected: number; pagesProcessed: number } {
@@ -53,9 +54,11 @@ function chunkText(text: string): string[] {
     const trimmed = slice.trim();
     if (trimmed.length > 0) chunks.push(trimmed);
 
-    // Always advance by DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP regardless of paragraph trimming,
-    // so overlap is consistent and we never stall on a short trimmed slice.
-    const advance = DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP;
+    // If we consumed the entire remaining text, stop
+    if (start + slice.length >= text.length) break;
+
+    // Advance based on actual content consumed so the gap after a paragraph trim is not lost
+    const advance = Math.max(slice.length - DOC_CHUNK_OVERLAP, Math.ceil(DOC_CHUNK_SIZE / 2));
     start += advance;
   }
 
@@ -67,7 +70,10 @@ export async function handleDocEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
-  const bodyText = await request.text().catch(() => '');
+  const bodyText = await request.text().catch((err) => {
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'doc', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+    throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
+  });
   if (bodyText.length > MAX_DOC_REQUEST_BODY_SIZE) {
     throw new ValidationError('Request body too large', ERROR_CODES.INVALID_INPUT);
   }
@@ -134,7 +140,7 @@ export async function handleDocEmbed(
   }
 
   const blob = new Blob([binaryData], { type: mimeType });
-  let conversionResult: { name: string; format: string; data?: string; error?: string };
+  let conversionResult: { name: string; format: string; data?: string; error?: string } | undefined;
 
   try {
     const results = await env.AI.toMarkdown(
@@ -142,7 +148,10 @@ export async function handleDocEmbed(
       { conversionOptions: { pdf: { metadata: false } } }
     );
     const item = Array.isArray(results) ? results[0] : results;
-    conversionResult = item;
+    if (!item || typeof item !== 'object' || !('format' in item)) {
+      throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
+    }
+    conversionResult = item as { name: string; format: string; data?: string; error?: string };
   } catch (err) {
     if (err instanceof WorkerError || err instanceof ValidationError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
@@ -220,11 +229,8 @@ export async function handleDocEmbed(
     throw new ValidationError('Document produced no embeddable chunks', ERROR_CODES.INVALID_INPUT);
   }
 
-  if (env.ENVIRONMENT !== 'production') {
-    console.debug(`[doc-embed] tenant=${ctx.tenantId} req=${ctx.requestId} chars=${processedMarkdown.length} chunks=${chunks.length}${maxPages !== undefined ? ` max_pages=${maxPages}` : ''}`);
-  }
-
-  const modelConfig = resolveDocModel(modelKey);
+  const modelConfig = resolveModel(modelKey);
+  await checkRateLimit(ctx.tenantId, 'doc', env);
   const result = await callDocProvider(chunks, modelConfig.id, env.VOYAGE_API_KEY, env.OPENAI_API_KEY, ctx.tenantId);
   const totalTokens = result.total_tokens;
   const actualModel = result._model;
@@ -232,6 +238,7 @@ export async function handleDocEmbed(
   const estimatedCost = ((totalTokens / 1_000_000) * actualCostPer1M).toFixed(6);
 
   const latency_ms = Date.now() - ctx.startTime;
+  console.error(JSON.stringify({ event: 'embed.success', endpoint: 'doc', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: actualModel, chunks: chunks.length, ...(result._provider !== 'voyage' && { fallback_provider: result._provider }) }));
 
   return jsonOk({
     success: true,
@@ -258,5 +265,5 @@ export async function handleDocEmbed(
     },
     request_id: ctx.requestId,
     latency_ms,
-  }, 200, request, env);
+  }, 200, request, env, ctx.requestId);
 }
