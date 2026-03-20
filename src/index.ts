@@ -7,7 +7,7 @@ import { handleImageEmbed } from './handlers/image';
 import { handleDocEmbed } from './handlers/doc';
 import { handleAdmin } from './admin';
 import { generateRequestId, getCorsHeaders, jsonOk, jsonError, handleError } from './utils/response';
-import { API_VERSION, MAX_REQUEST_BODY_SIZE, ERROR_CODES } from './constants';
+import { API_VERSION, MAX_REQUEST_BODY_SIZE, MAX_DOC_REQUEST_BODY_SIZE, MAX_IMAGE_REQUEST_BODY_SIZE, ERROR_CODES } from './constants';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -16,37 +16,41 @@ export default {
       ? clientId
       : generateRequestId();
 
-    // CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: getCorsHeaders(request, env) });
     }
 
-    // Body size guard — check Content-Length before reading body
     const contentLength = request.headers.get('Content-Length');
-    if (contentLength && Number(contentLength) > MAX_REQUEST_BODY_SIZE) {
-      return jsonError('Request body too large', 413, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+    const { pathname } = new URL(request.url);
+    const routeLimit = pathname === '/embeddings/doc'
+      ? MAX_DOC_REQUEST_BODY_SIZE
+      : pathname === '/embeddings/image'
+        ? MAX_IMAGE_REQUEST_BODY_SIZE
+        : MAX_REQUEST_BODY_SIZE;
+
+    if (contentLength) {
+      if (!/^\d+$/.test(contentLength)) {
+        return jsonError('Invalid Content-Length header', 400, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+      }
+      if (Number(contentLength) > routeLimit) {
+        return jsonError('Request body too large', 413, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+      }
     }
 
-    const { pathname } = new URL(request.url);
-
     try {
-      // ── Health ─────────────────────────────────────────
       if (pathname === '/health' && request.method === 'GET') {
         return jsonOk({
           status: 'ok',
           version: API_VERSION,
-          environment: env.ENVIRONMENT,
           timestamp: new Date().toISOString(),
         }, 200, request, env);
       }
 
-      // ── Admin routes ───────────────────────────────────
       if (pathname.startsWith('/admin/')) {
-        authenticateAdmin(request, env);
+        await authenticateAdmin(request, env);
         return await handleAdmin(request, env);
       }
 
-      // ── Embed routes ───────────────────────────────────
       if (pathname.startsWith('/embeddings/')) {
         const ctx = await authenticate(request, env, requestId);
 

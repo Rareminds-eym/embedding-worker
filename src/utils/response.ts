@@ -2,12 +2,10 @@
 
 import { CORS_MAX_AGE, ERROR_CODES } from '../constants';
 import type { Env } from '../types';
-import { AuthError, ValidationError, RateLimitError, ProviderError, WorkerError } from '../types';
+import { AuthError, ValidationError, ProviderError, RateLimitError, WorkerError } from '../types';
 
 export function generateRequestId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(6));
-  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-  return `req_${Date.now().toString(36)}_${hex}`;
+  return crypto.randomUUID();
 }
 
 export function getCorsHeaders(request: Request, env?: Env): Record<string, string> {
@@ -66,15 +64,19 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
     );
   }
   if (err instanceof RateLimitError) {
+    const extra: Record<string, unknown> = {};
+    if (err.retryAfterSeconds !== undefined) extra['retry_after_seconds'] = err.retryAfterSeconds;
     return new Response(
-      JSON.stringify({ success: false, errorCode: ERROR_CODES.RATE_LIMIT_EXCEEDED, message: 'Rate limit exceeded', request_id: requestId }),
-      { status: 429, headers: { ...headers, 'Retry-After': String(err.retryAfter) } }
+      JSON.stringify({ success: false, errorCode: ERROR_CODES.RATE_LIMIT_EXCEEDED, message: err.message, request_id: requestId, ...extra }),
+      { status: 429, headers }
     );
   }
   if (err instanceof ProviderError) {
+    const status = err.status === 429 ? 429 : (err.status >= 400 && err.status < 600 ? err.status : 502);
+    const errorCode = err.status === 429 ? ERROR_CODES.RATE_LIMIT_EXCEEDED : ERROR_CODES.PROVIDER_ERROR;
     return new Response(
-      JSON.stringify({ success: false, errorCode: ERROR_CODES.PROVIDER_ERROR, message: err.message, request_id: requestId }),
-      { status: 502, headers }
+      JSON.stringify({ success: false, errorCode, message: err.message, request_id: requestId }),
+      { status, headers }
     );
   }
   if (err instanceof WorkerError) {

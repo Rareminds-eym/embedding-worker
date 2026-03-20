@@ -3,10 +3,11 @@
 export interface Env {
   EMBEDDING_KV: KVNamespace;
   ADMIN_KEY: string;
-  OPENROUTER_API_KEY: string;
   VOYAGE_API_KEY: string;
+  OPENAI_API_KEY: string;
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
+  AI: Ai;
 }
 
 export interface TenantConfig {
@@ -48,17 +49,17 @@ export class ValidationError extends Error {
   }
 }
 
-export class RateLimitError extends Error {
-  constructor(public retryAfter: number) {
-    super('Rate limit exceeded');
-    this.name = 'RateLimitError';
-  }
-}
-
 export class ProviderError extends Error {
   constructor(message: string, public status: number) {
     super(message);
     this.name = 'ProviderError';
+  }
+}
+
+export class RateLimitError extends Error {
+  constructor(message: string, public retryAfterSeconds?: number) {
+    super(message);
+    this.name = 'RateLimitError';
   }
 }
 
