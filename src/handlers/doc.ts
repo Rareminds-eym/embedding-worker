@@ -57,8 +57,11 @@ function chunkText(text: string): string[] {
     // If we consumed the entire remaining text, stop
     if (start + slice.length >= text.length) break;
 
-    // Advance based on actual content consumed so the gap after a paragraph trim is not lost
-    const advance = Math.max(slice.length - DOC_CHUNK_OVERLAP, Math.ceil(DOC_CHUNK_SIZE / 2));
+    // Advance by (slice.length - DOC_CHUNK_OVERLAP): overlaps back by DOC_CHUNK_OVERLAP chars
+    // so context is preserved across chunk boundaries. When a paragraph break shortens the
+    // slice, this naturally lands just before the break — no chars are skipped.
+    // Floor at 1 to prevent an infinite loop if a slice is somehow empty after trimming.
+    const advance = Math.max(slice.length - DOC_CHUNK_OVERLAP, 1);
     start += advance;
   }
 
@@ -200,6 +203,9 @@ export async function handleDocEmbed(
   let pagesDetected: number | undefined;
   let pagesProcessed: number | undefined;
 
+  // Worst-case advance per chunk is (DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP) — the normal
+  // sliding-window stride. Paragraph-break chunks advance less, so this is the upper bound
+  // on chars covered across DOC_MAX_CHUNKS chunks.
   const maxProcessableChars = DOC_MAX_CHUNKS * (DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP);
 
   // Early rejection when no page limit is set — avoids allocating limitToPages on oversized docs

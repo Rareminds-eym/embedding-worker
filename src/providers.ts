@@ -155,11 +155,23 @@ async function callWithRetry<T>(
       throw new ProviderError(`${ctx.endpointName} provider error (${res.status})`, res.status);
     }
 
-    return validate(await res.json());
+    try {
+      return validate(await res.json());
+    } catch (err) {
+      if (err instanceof ProviderError || err instanceof RateLimitError) throw err;
+      console.error(JSON.stringify({
+        event: 'provider.invalid_response',
+        provider: ctx.providerName,
+        endpoint: ctx.endpointName,
+        tenant_id: ctx.tenantId,
+        model: ctx.model,
+        error: err instanceof Error ? err.message : String(err),
+        ...ctx.extraLogFields,
+      }));
+      throw new ProviderError(`${ctx.endpointName} provider returned an invalid response`, 502);
+    }
   }
 }
-
-// ─── Voyage caller ───────────────────────────────────────────────────────────
 
 async function callVoyageEndpoint<T>(
   endpoint: string,
@@ -195,13 +207,27 @@ async function callOpenAIEmbeddings(
     { model: OPENAI.defaultModel, input: inputs },
     (json) => {
       const j = json as { data: { embedding: number[]; index: number }[]; usage: { prompt_tokens: number; total_tokens: number } };
-      if (!j?.data || !Array.isArray(j.data) || j.data.length === 0) {
+      if (!j?.data || !Array.isArray(j.data) || j.data.length !== inputs.length) {
         throw new ProviderError('Invalid response from openai', 502);
       }
-      // Sort by index — OpenAI may return out-of-order
-      const sorted = [...j.data].sort((a, b) => a.index - b.index);
+      // Validate full unique 0..n-1 index set before reordering
+      const ordered: ({ embedding: number[] } | null)[] = Array(inputs.length).fill(null);
+      for (const item of j.data) {
+        if (
+          !Number.isInteger(item.index) ||
+          item.index < 0 ||
+          item.index >= inputs.length ||
+          ordered[item.index] !== null
+        ) {
+          throw new ProviderError('Invalid response from openai', 502);
+        }
+        ordered[item.index] = { embedding: item.embedding };
+      }
+      if (ordered.some((item) => item === null)) {
+        throw new ProviderError('Invalid response from openai', 502);
+      }
       return {
-        data: sorted.map(d => ({ embedding: d.embedding })),
+        data: ordered.map((item) => item!),
         usage: { total_tokens: j.usage?.total_tokens ?? 0 },
       };
     },
@@ -297,13 +323,18 @@ export async function callDocProvider(
     // Fan out all batches in parallel — sort by start index afterwards to preserve chunk order
     const batchStarts: number[] = [];
     for (let i = 0; i < chunks.length; i += DOC_BATCH_SIZE) batchStarts.push(i);
-    const batchResults = await Promise.all(
-      batchStarts.map(async (i) => {
-        const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-        const res = await callOpenAIEmbeddings(batch, openaiApiKey, tenantId, 'doc');
-        return { i, res };
-      }),
-    );
+    const batchResults: { i: number; res: { data: { embedding: number[] }[]; usage: { total_tokens: number } } }[] = [];
+    const MAX_DOC_BATCH_CONCURRENCY = 4;
+    for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
+      const window = batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY);
+      batchResults.push(...await Promise.all(
+        window.map(async (i) => {
+          const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
+          const res = await callOpenAIEmbeddings(batch, openaiApiKey, tenantId, 'doc');
+          return { i, res };
+        }),
+      ));
+    }
     // Sort by batch start index to guarantee final order matches input order
     batchResults.sort((a, b) => a.i - b.i);
     for (const { i, res } of batchResults) {

@@ -40,7 +40,7 @@ export const RATE_LIMIT_WINDOW_SECONDS = 60;
 export const RATE_LIMITS: Record<'text' | 'image' | 'doc', number> = {
   text:  30,   // 30 req/min per tenant (conservative — KV not atomic)
   image: 15,   // 15 req/min per tenant
-  doc:   10,   // 10 req/min per tenant
+  doc:   100,  // 100 req/min per tenant
 };
 
 export const CORS_MAX_AGE = 86400;

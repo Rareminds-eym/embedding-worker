@@ -102,7 +102,8 @@ async function listTenants(request: Request, env: Env): Promise<Response> {
   const limitParam = url.searchParams.get('limit');
   const cursorParam = url.searchParams.get('cursor') ?? undefined;
 
-  const pageSize = limitParam ? Math.min(Math.max(parseInt(limitParam, 10) || 50, 1), 100) : 50;
+  const parsedLimit = limitParam === null ? NaN : parseInt(limitParam, 10);
+  const pageSize = Number.isNaN(parsedLimit) ? 50 : Math.min(Math.max(parsedLimit, 1), 100);
 
   const page = await env.EMBEDDING_KV.list({ prefix: 'tenant:', limit: pageSize, cursor: cursorParam });
   const nextCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
@@ -163,6 +164,26 @@ async function deleteTenant(request: Request, env: Env): Promise<Response> {
     tkCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
   } while (tkCursor);
   await Promise.all(apiKeyDeletes);
+
+  // Legacy fallback: scan api_keys:* for entries belonging to this tenant that predate
+  // the reverse-index. Without this, keys created before rollout remain valid if the
+  // tenant ID is ever reused.
+  let legacyCursor: string | undefined;
+  const legacyDeletes: Promise<void>[] = [];
+  do {
+    const page = await env.EMBEDDING_KV.list({ prefix: 'api_keys:', limit: 100, cursor: legacyCursor });
+    for (const k of page.keys) {
+      const raw = await env.EMBEDDING_KV.get(k.name);
+      if (raw) {
+        try {
+          const rec: ApiKeyRecord = JSON.parse(raw);
+          if (rec.tenant_id === id) legacyDeletes.push(env.EMBEDDING_KV.delete(k.name));
+        } catch { /* skip corrupt records */ }
+      }
+    }
+    legacyCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
+  } while (legacyCursor);
+  await Promise.all(legacyDeletes);
 
   await env.EMBEDDING_KV.delete(`tenant:${id}`);
 
