@@ -25,7 +25,15 @@ export async function authenticate(request: Request, env: Env, requestId: string
 
   let keyRecord: ApiKeyRecord;
   try {
-    keyRecord = JSON.parse(keyRaw);
+    const parsed: unknown = JSON.parse(keyRaw);
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      typeof (parsed as Record<string, unknown>).tenant_id !== 'string'
+    ) {
+      throw new Error('invalid key record shape');
+    }
+    keyRecord = parsed as ApiKeyRecord;
   } catch {
     console.error(JSON.stringify({ event: 'auth.corrupt_key_record', hash }));
     throw new AuthError('Invalid API key', 'UNAUTHORIZED');

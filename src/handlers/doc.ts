@@ -70,6 +70,8 @@ export async function handleDocEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
+  await checkRateLimit(ctx.tenantId, 'doc', env);
+
   const bodyText = await request.text().catch((err) => {
     console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'doc', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
@@ -230,7 +232,6 @@ export async function handleDocEmbed(
   }
 
   const modelConfig = resolveModel(modelKey);
-  await checkRateLimit(ctx.tenantId, 'doc', env);
   const result = await callDocProvider(chunks, modelConfig.id, env.VOYAGE_API_KEY, env.OPENAI_API_KEY, ctx.tenantId);
   const totalTokens = result.total_tokens;
   const actualModel = result._model;

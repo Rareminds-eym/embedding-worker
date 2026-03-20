@@ -68,6 +68,8 @@ export async function handleTextEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
+  await checkRateLimit(ctx.tenantId, 'text', env);
+
   const bodyText = await request.text().catch((err) => {
     console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'text', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
@@ -115,7 +117,6 @@ export async function handleTextEmbed(
     );
   }
 
-  await checkRateLimit(ctx.tenantId, 'text', env);
   const modelConfig = resolveModel(modelKey);
   const result = await callTextProvider([text], modelConfig.id, env.VOYAGE_API_KEY, env.OPENAI_API_KEY, ctx.tenantId);
   const embedding = result.data[0].embedding;

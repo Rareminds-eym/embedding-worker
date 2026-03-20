@@ -131,7 +131,7 @@ async function listTenants(request: Request, env: Env): Promise<Response> {
   return jsonOk({
     success: true,
     tenants,
-    total: tenants.length,
+    count: tenants.length,
     ...(nextCursor && { next_cursor: nextCursor }),
   }, 200, request, env);
 }

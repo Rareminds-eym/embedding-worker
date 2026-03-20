@@ -11,28 +11,22 @@ import { API_VERSION, MAX_REQUEST_BODY_SIZE, MAX_DOC_REQUEST_BODY_SIZE, MAX_IMAG
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Fail loudly if KV binding is missing or placeholder IDs were not replaced before deployment
-    if (env.EMBEDDING_KV === undefined) {
-      console.error(JSON.stringify({ event: 'startup.misconfigured', reason: 'EMBEDDING_KV binding missing' }));
-      return new Response(
-        JSON.stringify({ success: false, errorCode: 'INTERNAL_ERROR', message: 'Service misconfigured' }),
-        { status: 503, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(request, env) } },
-      );
-    }
-    // KVNamespace exposes the namespace ID at runtime — catch unreplaced wrangler.toml placeholders
-    const kvId = (env.EMBEDDING_KV as unknown as { id?: string }).id ?? '';
-    if (kvId.startsWith('REPLACE_WITH')) {
-      console.error(JSON.stringify({ event: 'startup.misconfigured', reason: 'KV namespace ID not replaced in wrangler.toml', id: kvId }));
-      return new Response(
-        JSON.stringify({ success: false, errorCode: 'INTERNAL_ERROR', message: 'Service misconfigured' }),
-        { status: 503, headers: { 'Content-Type': 'application/json', ...getCorsHeaders(request, env) } },
-      );
-    }
-
     const clientId = request.headers.get('X-Request-ID');
     const requestId = (clientId && /^[a-zA-Z0-9_-]{1,64}$/.test(clientId))
       ? clientId
       : generateRequestId();
+
+    // Fail loudly if KV binding is missing or placeholder IDs were not replaced before deployment
+    if (env.EMBEDDING_KV === undefined) {
+      console.error(JSON.stringify({ event: 'startup.misconfigured', reason: 'EMBEDDING_KV binding missing', request_id: requestId }));
+      return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
+    }
+    // KVNamespace exposes the namespace ID at runtime — catch unreplaced wrangler.toml placeholders
+    const kvId = (env.EMBEDDING_KV as unknown as { id?: string }).id ?? '';
+    if (kvId.startsWith('REPLACE_WITH')) {
+      console.error(JSON.stringify({ event: 'startup.misconfigured', reason: 'KV namespace ID not replaced in wrangler.toml', id: kvId, request_id: requestId }));
+      return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
+    }
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: getCorsHeaders(request, env) });
@@ -72,8 +66,11 @@ export default {
       }
 
       if (pathname.startsWith('/embeddings/')) {
-        if (request.method === 'POST' && !request.headers.get('Content-Type')?.includes('application/json')) {
-          return jsonError('Content-Type must be application/json', 415, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+        if (request.method === 'POST') {
+          const mediaType = request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase();
+          if (mediaType !== 'application/json') {
+            return jsonError('Content-Type must be application/json', 415, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+          }
         }
         // Check required secrets here — /health must not depend on secret availability
         if (!env.VOYAGE_API_KEY) {

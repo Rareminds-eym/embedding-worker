@@ -83,6 +83,8 @@ export async function handleImageEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
+  await checkRateLimit(ctx.tenantId, 'image', env);
+
   const bodyText = await request.text().catch((err) => {
     console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'image', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
@@ -113,7 +115,6 @@ export async function handleImageEmbed(
     );
   }
   const modelConfig = resolveImageModel(modelKey);
-  await checkRateLimit(ctx.tenantId, 'image', env);
   const result = await callImageProvider(buildVoyageInputs(inputs), modelConfig.id, env.VOYAGE_API_KEY, ctx.tenantId);
   const totalTokens = result.usage?.total_tokens ?? 0;
   const estimatedCost = ((totalTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);

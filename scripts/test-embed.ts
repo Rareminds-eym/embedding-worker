@@ -413,7 +413,7 @@ async function testAdminRoutes() {
       headers: { 'X-Admin-Key': ADMIN_KEY },
     });
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.tenants) && typeof data.total === 'number') pass('GET /admin/tenants → list with total');
+    if (res.ok && Array.isArray(data.tenants) && typeof data.count === 'number') pass('GET /admin/tenants → list with count');
     else fail('GET /admin/tenants', data);
   }
 

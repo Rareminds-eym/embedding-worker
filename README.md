@@ -829,9 +829,12 @@ Auth: `X-Admin-Key: <value>`
   "tenants": [
     { "tenant_id": "skillpassport", "name": "Skill Passport", "created_at": "2026-03-17T08:00:00.000Z" }
   ],
-  "total": 1
+  "count": 1,
+  "next_cursor": "optional-cursor-string"
 }
 ```
+
+`count` is the number of tenants in the current page, not the total across all pages. Use `next_cursor` with `?cursor=` to paginate.
 
 ---
 

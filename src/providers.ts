@@ -290,6 +290,7 @@ export async function callDocProvider(
 
   if (useOpenAI) {
     if (!openaiApiKey) {
+      console.error(JSON.stringify({ event: 'provider.missing_openai_key', endpoint: 'doc', tenant_id: tenantId, chunks: chunks.length }));
       throw new ProviderError('Service unavailable: document embedding is not available', 503);
     }
     console.error(JSON.stringify({ event: 'provider.multi_chunk', provider: OPENAI.name, endpoint: 'doc', tenant_id: tenantId, chunks: chunks.length }));
