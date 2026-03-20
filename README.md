@@ -697,7 +697,7 @@ npm run test
 **6. Create a tenant manually**
 ```bash
 curl -X POST http://127.0.0.1:9004/admin/tenant \
-  -H "X-Admin-Key: local-admin-key" \
+  -H "X-Admin-Key: <your-admin-key>" \
   -H "Content-Type: application/json" \
   -d '{"id":"test","name":"Test Tenant"}'
 ```
