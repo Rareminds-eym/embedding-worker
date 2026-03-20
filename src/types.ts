@@ -4,6 +4,7 @@ export interface Env {
   EMBEDDING_KV: KVNamespace;
   ADMIN_KEY: string;
   VOYAGE_API_KEY: string;
+  OPENAI_API_KEY: string;
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
   AI: Ai;

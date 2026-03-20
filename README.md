@@ -60,7 +60,7 @@ A multi-tenant embedding API built on Cloudflare Workers. Converts text, images,
 |---|---|
 | Runtime | Cloudflare Workers (TypeScript) |
 | KV Store | Cloudflare KV (`EMBEDDING_KV`) |
-| Text & Doc Embeddings | Voyage AI — `voyage-3` (default) |
+| Text & Doc Embeddings | Voyage AI — `voyage-4` (default) |
 | Image Embeddings | Voyage AI — `voyage-multimodal-3.5` (default) |
 | Doc → Markdown | Cloudflare Workers AI `toMarkdown` |
 | Local dev port | `9004` |
@@ -108,8 +108,9 @@ To swap providers, only edit `providers.ts` — no handler files need to change.
 |---|---|---|
 | `ADMIN_KEY` | Secret | Protects all `/admin/*` routes |
 | `VOYAGE_API_KEY` | Secret | Voyage AI API key |
+| `OPENAI_API_KEY` | Secret | OpenAI via OpenRouter — used as fallback for text and doc endpoints |
 | `ALLOWED_ORIGINS` | `wrangler.toml` vars | Comma-separated CORS allowlist |
-| `ENVIRONMENT` | `wrangler.toml` vars | `local` / `development` / `staging` / `production` |
+| `ENVIRONMENT` | `wrangler.toml` vars | `local` / `dev` / `staging` / `production` |
 
 Secrets are set via `.dev.vars` locally and `wrangler secret put` for deployed environments.
 
@@ -149,6 +150,28 @@ X-Admin-Key: <value>
 
 ---
 
+## Provider Fallback
+
+If Voyage AI fails (rate limit or any error), the text and doc endpoints automatically retry using OpenAI (`text-embedding-3-small`) via OpenRouter — no action needed from the caller.
+
+- Fallback is triggered on `429` (rate limit) or any `ProviderError`
+- Only works if `OPENAI_API_KEY` is set in secrets
+- Image endpoint has no fallback (OpenAI does not support image embeddings)
+- When fallback is used, the response includes `"fallback_provider": "openai"` and dimensions will be `1536` instead of `1024`
+
+```json
+{
+  "success": true,
+  "embedding": [...],
+  "model": "openai/text-embedding-3-small",
+  "fallback_provider": "openai",
+  "dimensions": 1536,
+  ...
+}
+```
+
+---
+
 ## CORS
 
 Origins are configured per environment in `wrangler.toml` via `ALLOWED_ORIGINS`. Only listed origins are reflected — no wildcard fallback.
@@ -156,7 +179,7 @@ Origins are configured per environment in `wrangler.toml` via `ALLOWED_ORIGINS`.
 | Environment | Allowed Origins |
 |---|---|
 | local | `http://localhost:5173`, `http://localhost:8788`, `http://127.0.0.1:5173`, `http://127.0.0.1:8788` |
-| development | `https://dev.skillpassports.com` |
+| dev | `https://dev.skillpassports.com` |
 | staging | `https://stag.skillpassports.com` |
 | production | `https://skillpassport.com`, `https://www.skillpassport.com` |
 
@@ -166,8 +189,7 @@ Origins are configured per environment in `wrangler.toml` via `ALLOWED_ORIGINS`.
 
 ```typescript
 // Text
-MAX_INPUT_CHARS          = 32_000      // hard cap per input string
-SAFE_CHAR_LIMIT          = 24_000      // object/array inputs truncated here
+TEXT_MAX_CHARS           = 120_000     // ~30K tokens — respects Voyage 32K context window
 MAX_REQUEST_BODY_SIZE    = 1_000_000   // 1MB
 
 // Image
@@ -187,9 +209,9 @@ ALLOWED_DOC_TYPES             = PDF, Word (.docx), Excel (.xlsx)
 
 // Provider
 VOYAGE_TIMEOUT_MS    = 30_000   // 30s per Voyage call
-RETRY_DELAY_MS       = 500
-MAX_RETRIES          = 1        // retry once on 5xx; 429 respects Retry-After
-DOC_BATCH_SIZE       = 10       // chunks per Voyage batch in doc handler
+RETRY_DELAY_MS       = 1_000
+MAX_RETRIES          = 3        // retries on 5xx; 429 retries with Retry-After delay
+DOC_BATCH_SIZE       = 10       // chunks per sequential Voyage batch in doc handler
 ```
 
 ---
@@ -198,8 +220,9 @@ DOC_BATCH_SIZE       = 10       // chunks per Voyage batch in doc handler
 
 | Model | Used For | Dimensions | Cost per 1M tokens |
 |---|---|---|---|
-| `voyage-3` | text, doc (default) | 1024 | $0.06 |
-| `voyage-3-lite` | text, doc (cheaper) | 512 | $0.02 |
+| `voyage-4` | text, doc (default) | 1024 | $0.06 |
+| `voyage-4-lite` | text, doc (cheaper) | 1024 | $0.02 |
+| `voyage-4-large` | text, doc (highest quality) | 1024 | $0.12 |
 | `voyage-multimodal-3.5` | image (default) | 1024 | $0.12 |
 | `voyage-multimodal-3` | image (legacy) | 1024 | $0.12 |
 
@@ -299,7 +322,7 @@ The string is detected as JSON, parsed, and extracted — same result as passing
 
 #### Array
 
-Pass an array of strings or objects. All items are extracted and joined.
+Pass an array of strings or objects. All items are normalized and joined into one string for a single embedding call.
 
 ```json
 {
@@ -307,7 +330,7 @@ Pass an array of strings or objects. All items are extracted and joined.
 }
 ```
 
-Mixed arrays also work:
+Mixed arrays (strings and objects) also work:
 
 ```json
 {
@@ -321,23 +344,17 @@ Mixed arrays also work:
 
 ---
 
-#### Truncation
-
-If the extracted text exceeds 24,000 characters, it is automatically truncated and `"truncated": true` is added to the response. The first 24,000 chars are used. If you need to embed very large objects, split them into logical sections and embed each separately.
-
----
-
 #### Model selection
 
 ```json
-{ "input": "some text", "model": "voyage-3-lite" }
+{ "input": "some text", "model": "voyage-4-lite" }
 ```
 
 | Model | Dimensions | Cost | When to use |
 |---|---|---|---|
-| `voyage-3` | 1024 | $0.06/1M | default, best quality |
-| `voyage-3-lite` | 512 | $0.02/1M | high volume, cost-sensitive |
-
+| `voyage-4` | 1024 | $0.06/1M | default, best quality |
+| `voyage-4-lite` | 1024 | $0.02/1M | high volume, cost-sensitive |
+| `voyage-4-large` | 1024 | $0.12/1M | highest quality |
 ---
 
 ### Image Endpoint Inputs
@@ -478,7 +495,7 @@ Use `max_pages` to limit how many pages are processed. Useful for large document
     "data": "<base64>",
     "filename": "job_description.docx"
   },
-  "model": "voyage-3-lite"
+  "model": "voyage-4-lite"
 }
 ```
 
@@ -588,7 +605,6 @@ Public. No auth required.
 {
   "status": "ok",
   "version": "1.0.0",
-  "environment": "production",
   "timestamp": "2026-03-17T08:00:00.000Z"
 }
 ```
@@ -605,7 +621,8 @@ Embeds a single text input. See [Input Guide — Text](#text-endpoint-inputs) fo
 { "input": "plain string" }
 { "input": { "name": "Jane", "title": "Engineer", "skills": ["Python"] } }
 { "input": ["machine learning", "deep learning"] }
-{ "input": "...", "model": "voyage-3-lite" }
+{ "input": ["Python developer", { "skill": "FastAPI", "years": 3 }] }
+{ "input": "...", "model": "voyage-4-lite" }
 ```
 
 Response:
@@ -613,18 +630,15 @@ Response:
 {
   "success": true,
   "embedding": [0.023, -0.041, ...],
-  "model": "voyage-3",
+  "model": "voyage-4",
   "dimensions": 1024,
   "usage": {
     "total_tokens": 12,
     "estimated_cost_usd": "0.000001"
   },
-  "request_id": "req_abc123_def456",
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "latency_ms": 210
 }
-```
-
-If input was truncated, `"truncated": true` is included in the response.
 
 ---
 
@@ -657,7 +671,7 @@ Single input response:
   "dimensions": 1024,
   "model": "voyage-multimodal-3.5",
   "usage": { "total_tokens": 89, "estimated_cost_usd": "0.000011" },
-  "request_id": "req_abc123_def456",
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "latency_ms": 691
 }
 ```
@@ -672,7 +686,7 @@ Batch response returns `embeddings` array instead of `embedding`:
   ],
   "model": "voyage-multimodal-3.5",
   "usage": { "total_tokens": 536, "estimated_cost_usd": "0.000064" },
-  "request_id": "req_abc123_def456",
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "latency_ms": 1200
 }
 ```
@@ -707,13 +721,13 @@ See [Input Guide — Doc](#doc-endpoint-inputs) for base64 encoding examples, pa
     "data": "<base64 encoded file>",
     "filename": "resume.pdf"
   },
-  "model": "voyage-3-lite",
+  "model": "voyage-4-lite",
   "max_pages": 10
 }
 ```
 
 - `filename` — optional, defaults to `document.<ext>`
-- `model` — optional, defaults to `voyage-3`
+- `model` — optional, defaults to `voyage-4`
 - `max_pages` — optional, integer 1–100
 
 **Response:**
@@ -724,7 +738,7 @@ See [Input Guide — Doc](#doc-endpoint-inputs) for base64 encoding examples, pa
     { "index": 0, "embedding": [...], "dimensions": 1024 },
     { "index": 1, "embedding": [...], "dimensions": 1024 }
   ],
-  "model": "voyage-3",
+  "model": "voyage-4",
   "document": {
     "filename": "resume.pdf",
     "mimeType": "application/pdf",
@@ -740,7 +754,7 @@ See [Input Guide — Doc](#doc-endpoint-inputs) for base64 encoding examples, pa
     "total_tokens": 4303,
     "estimated_cost_usd": "0.000258"
   },
-  "request_id": "req_abc123_def456",
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
   "latency_ms": 3200
 }
 ```
@@ -766,7 +780,7 @@ Creates a new tenant and generates an API key.
 { "id": "skillpassport", "name": "Skill Passport" }
 ```
 
-`id` is lowercased and non-alphanumeric characters replaced with `-`.
+`id` must match `/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/` — lowercase alphanumeric and hyphens only. Invalid IDs are rejected with a 400.
 
 Response `201`:
 ```json
@@ -830,7 +844,7 @@ All errors follow this shape:
   "success": false,
   "errorCode": "UNAUTHORIZED",
   "message": "Invalid API key",
-  "request_id": "req_abc123_def456"
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 }
 ```
 
@@ -858,7 +872,6 @@ npm install
 ```
 ADMIN_KEY=local-admin-key
 VOYAGE_API_KEY=pa-...
-ENVIRONMENT=local
 ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788
 ```
 
@@ -903,9 +916,9 @@ curl -X POST http://127.0.0.1:9004/embeddings/doc \
 
 **1. Create KV namespaces**
 ```bash
-npx wrangler kv namespace create EMBEDDING_KV --env development
-npx wrangler kv namespace create EMBEDDING_KV --env staging
-npx wrangler kv namespace create EMBEDDING_KV --env production
+npm run kv:create:dev
+npm run kv:create:staging
+npm run kv:create:production
 ```
 
 Replace the `REPLACE_WITH_*_KV_ID` placeholders in `wrangler.toml` with the returned IDs.
@@ -918,14 +931,9 @@ wrangler secret put VOYAGE_API_KEY --env production
 
 **3. Deploy**
 ```bash
-npx wrangler deploy --env production
-```
-
-Available deploy commands:
-```bash
-npm run deploy:dev        # → embedding-worker-dev
-npm run deploy:staging    # → embedding-worker-staging
-npm run deploy:production # → embedding-worker-production
+npm run deploy:dev        # → embedding-worker (dev env)
+npm run deploy:staging    # → embedding-worker (staging env)
+npm run deploy:production # → embedding-worker (production env)
 ```
 
 ---

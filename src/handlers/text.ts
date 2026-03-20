@@ -118,18 +118,21 @@ export async function handleTextEmbed(
   }
 
   const modelConfig = resolveModel(modelKey);
-  const result = await callTextProvider([text], modelConfig.id, env.VOYAGE_API_KEY, ctx.tenantId);
+  const result = await callTextProvider([text], modelConfig.id, env.VOYAGE_API_KEY, env.OPENAI_API_KEY, ctx.tenantId);
   const embedding = result.data[0].embedding;
   const promptTokens = result.usage?.total_tokens ?? 0;
-  const estimatedCost = ((promptTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);
+  // Use actual model/provider returned — may differ if fallback was triggered
+  const actualModel = result._model;
+  const actualCostPer1M = result._provider === 'openai' ? 0.02 : modelConfig.costPer1M;
+  const estimatedCost = ((promptTokens / 1_000_000) * actualCostPer1M).toFixed(6);
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', tenant_id: ctx.tenantId, tokens: promptTokens, latency_ms, model: modelConfig.id }));
 
   return jsonOk({
     success: true,
     embedding,
-    model: modelConfig.id,
+    model: actualModel,
+    ...(result._provider !== 'voyage' && { fallback_provider: result._provider }),
     dimensions: embedding.length,
     usage: {
       total_tokens: promptTokens,

@@ -44,6 +44,7 @@ function chunkText(text: string): string[] {
     const end = start + DOC_CHUNK_SIZE;
     let slice = text.slice(start, end);
 
+    // Try to break at a paragraph boundary, but only in the second half of the slice
     if (end < text.length) {
       const lastBreak = slice.lastIndexOf('\n\n');
       if (lastBreak > DOC_CHUNK_SIZE / 2) slice = slice.slice(0, lastBreak);
@@ -52,8 +53,9 @@ function chunkText(text: string): string[] {
     const trimmed = slice.trim();
     if (trimmed.length > 0) chunks.push(trimmed);
 
-    const advance = slice.length - DOC_CHUNK_OVERLAP;
-    if (advance <= 0) break;
+    // Always advance by DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP regardless of paragraph trimming,
+    // so overlap is consistent and we never stall on a short trimmed slice.
+    const advance = DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP;
     start += advance;
   }
 
@@ -169,10 +171,6 @@ export async function handleDocEmbed(
 
   const markdown = conversionResult.data.trim();
 
-  if (env.ENVIRONMENT !== 'production') {
-    console.debug(`[doc-embed:markdown] format=${conversionResult.format} raw_chars=${markdown.length} snippet=${JSON.stringify(markdown.slice(0, 120))}`);
-  }
-
   if (markdown.length === 0) {
     throw new ValidationError(
       'Document produced no extractable text. This PDF appears to be image-only (scanned). Use /embeddings/image to embed individual page images instead.',
@@ -227,12 +225,13 @@ export async function handleDocEmbed(
   }
 
   const modelConfig = resolveDocModel(modelKey);
-  const result = await callDocProvider(chunks, modelConfig.id, env.VOYAGE_API_KEY, ctx.tenantId);
+  const result = await callDocProvider(chunks, modelConfig.id, env.VOYAGE_API_KEY, env.OPENAI_API_KEY, ctx.tenantId);
   const totalTokens = result.total_tokens;
-  const estimatedCost = ((totalTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);
+  const actualModel = result._model;
+  const actualCostPer1M = result._provider === 'openai' ? 0.02 : modelConfig.costPer1M;
+  const estimatedCost = ((totalTokens / 1_000_000) * actualCostPer1M).toFixed(6);
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: modelConfig.id, chunks: chunks.length }));
 
   return jsonOk({
     success: true,
@@ -241,7 +240,8 @@ export async function handleDocEmbed(
       embedding: item.embedding,
       dimensions: item.embedding.length,
     })),
-    model: modelConfig.id,
+    model: actualModel,
+    ...(result._provider !== 'voyage' && { fallback_provider: result._provider }),
     document: {
       filename,
       mimeType,

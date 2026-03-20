@@ -27,6 +27,7 @@ preview_id = "REPLACE_WITH_LOCAL_KV_ID"
 
 # wrangler secret put ADMIN_KEY
 # wrangler secret put VOYAGE_API_KEY
+# wrangler secret put OPENAI_API_KEY
 
 # ============================================================================
 # DEVELOPMENT  →  wrangler deploy --env dev
@@ -45,6 +46,7 @@ id = "REPLACE_WITH_DEV_KV_ID"
 
 # wrangler secret put ADMIN_KEY      --env dev
 # wrangler secret put VOYAGE_API_KEY --env dev
+# wrangler secret put OPENAI_API_KEY --env dev
 
 # ============================================================================
 # STAGING  →  wrangler deploy --env staging
@@ -63,6 +65,7 @@ id = "REPLACE_WITH_STAGING_KV_ID"
 
 # wrangler secret put ADMIN_KEY      --env staging
 # wrangler secret put VOYAGE_API_KEY --env staging
+# wrangler secret put OPENAI_API_KEY --env staging
 
 # ============================================================================
 # PRODUCTION  →  wrangler deploy --env production
@@ -81,3 +84,4 @@ id = "REPLACE_WITH_PRODUCTION_KV_ID"
 
 # wrangler secret put ADMIN_KEY      --env production
 # wrangler secret put VOYAGE_API_KEY --env production
+# wrangler secret put OPENAI_API_KEY --env production
