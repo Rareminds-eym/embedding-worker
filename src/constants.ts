@@ -2,6 +2,7 @@
 
 export const API_VERSION = '1.0.0';
 
+// 24 bytes → 48 hex chars; matches TOKEN_REGEX /^sk_[a-f0-9]{48}$/ in auth.ts
 export const API_KEY_BYTE_LENGTH = 24;
 
 export const MAX_REQUEST_BODY_SIZE = 1_000_000;
@@ -26,21 +27,19 @@ export const DOC_MAX_PAGES = 100;
 export const DOC_CHARS_PER_PAGE = 3_000;
 export const DOC_MIN_CONTENT_CHARS = 50;
 export const DOC_BATCH_SIZE = 10;
+export const MAX_DOC_BATCH_CONCURRENCY = 4;
 
-export const TEXT_MAX_CHARS = 120_000; // ~30K tokens — respects Voyage 32K token context window
+export const TEXT_MAX_CHARS = 120_000;
 
 export const VOYAGE_TIMEOUT_MS = 30_000;
 export const RETRY_DELAY_MS = 1_000;
 export const MAX_RETRIES = 3;
 
-// Per-tenant rate limits (requests per window)
-// NOTE: KV-based rate limiting is not atomic — concurrent bursts can bypass limits.
-// Limits are set conservatively to reduce blast radius. Use Durable Objects for strict enforcement.
 export const RATE_LIMIT_WINDOW_SECONDS = 60;
 export const RATE_LIMITS: Record<'text' | 'image' | 'doc', number> = {
-  text:  30,   // 30 req/min per tenant (conservative — KV not atomic)
-  image: 15,   // 15 req/min per tenant
-  doc:   100,  // 100 req/min per tenant
+  text:  120,
+  image:  60,
+  doc:    30,
 };
 
 export const CORS_MAX_AGE = 86400;

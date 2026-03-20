@@ -3,8 +3,8 @@
 export interface Env {
   EMBEDDING_KV: KVNamespace;
   ADMIN_KEY: string;
-  VOYAGE_API_KEY: string;
-  OPENAI_API_KEY?: string;  // optional — absence disables OpenAI fallback for text and single-chunk doc
+  VOYAGE_API_KEY?: string;  // required only for /embeddings/image
+  OPENAI_API_KEY?: string;  // required for /embeddings/text and /embeddings/doc
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
   AI: Ai;

@@ -11,7 +11,6 @@ function generateToken(): string {
   return `sk_${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
-// POST /admin/tenant
 async function createTenant(request: Request, env: Env): Promise<Response> {
   const body = await request.json().catch(() => null) as {
     id?: string;
@@ -31,9 +30,13 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
     throw new WorkerError(`Tenant '${tenantId}' already exists`, ERROR_CODES.TENANT_EXISTS, 409);
   }
 
-  // Optimistic lock: write a short-TTL lock key to reduce TOCTOU race window.
-  // KV has no atomic CAS, so concurrent requests can still race, but this makes
-  // the window small enough to be acceptable for low-frequency admin operations.
+  // KNOWN LIMITATION: This lock is not atomic. Cloudflare KV has no
+  // compare-and-swap / putIfAbsent primitive, so two simultaneous POST
+  // /admin/tenant requests with the same id can both pass the lock check
+  // and both proceed to write, resulting in duplicate key records for the
+  // same tenant. In practice the /admin endpoint is called by operators,
+  // not end-users, so the race window is narrow. For strict prevention,
+  // move tenant creation into a Durable Object.
   const lockKey = `lock:tenant:${tenantId}`;
   const lockHeld = await env.EMBEDDING_KV.get(lockKey);
   if (lockHeld) {
@@ -55,15 +58,12 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
   };
 
   try {
-    // Write reverse index first — an orphaned index entry is harmless.
-    // An orphaned api_keys: entry (written first) would grant auth forever and
-    // never be found by deleteTenant's reverse-index scan.
     await env.EMBEDDING_KV.put(`tenant_keys:${tenantId}:${hash}`, '1');
     await env.EMBEDDING_KV.put(`api_keys:${hash}`, JSON.stringify(keyRecord));
-    await env.EMBEDDING_KV.put(`tenant:${tenantId}`, JSON.stringify(tenant));
+    await env.EMBEDDING_KV.put(`tenant:${tenantId}`, JSON.stringify(tenant), {
+      metadata: { name: tenant.name, created_at: tenant.created_at },
+    });
   } finally {
-    // Always release the lock — whether the writes succeeded or failed.
-    // On failure the caller can retry; on success the lock is no longer needed.
     await env.EMBEDDING_KV.delete(lockKey).catch(() => {});
   }
 
@@ -75,7 +75,6 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
   }, 201, request, env);
 }
 
-// GET /admin/tenant?id=xxx
 async function getTenant(request: Request, env: Env): Promise<Response> {
   const id = new URL(request.url).searchParams.get('id');
   if (!id) throw new ValidationError('Missing query param: id', ERROR_CODES.INVALID_INPUT);
@@ -96,7 +95,6 @@ async function getTenant(request: Request, env: Env): Promise<Response> {
   return jsonOk({ success: true, tenant_id: id, config: tenant }, 200, request, env);
 }
 
-// GET /admin/tenants?limit=50&cursor=xxx
 async function listTenants(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const limitParam = url.searchParams.get('limit');
@@ -105,29 +103,40 @@ async function listTenants(request: Request, env: Env): Promise<Response> {
   const parsedLimit = limitParam === null ? NaN : parseInt(limitParam, 10);
   const pageSize = Number.isNaN(parsedLimit) ? 50 : Math.min(Math.max(parsedLimit, 1), 100);
 
-  const page = await env.EMBEDDING_KV.list({ prefix: 'tenant:', limit: pageSize, cursor: cursorParam });
+  const page = await env.EMBEDDING_KV.list<{ name: string; created_at: string }>({
+    prefix: 'tenant:',
+    limit: pageSize,
+    cursor: cursorParam,
+  });
   const nextCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
 
-  // pageSize capped at 100 — each key requires one KV.get(), so this consumes up to 100
-  // of the 1,000 subrequest budget per Worker invocation. Do not raise the cap without review.
-  const values = await Promise.all(page.keys.map(k => env.EMBEDDING_KV.get(k.name)));
+  // Batch-fetch any keys missing metadata to avoid N+1 serial KV reads.
+  const withMeta = page.keys.filter(k => k.metadata?.name && k.metadata?.created_at);
+  const withoutMeta = page.keys.filter(k => !k.metadata?.name || !k.metadata?.created_at);
+  const fetched = await Promise.all(
+    withoutMeta.map(k => env.EMBEDDING_KV.get(k.name).then(raw => ({ k, raw })))
+  );
+
   const tenants: { tenant_id: string; name: string; created_at: string }[] = [];
-  for (let i = 0; i < page.keys.length; i++) {
-    const raw = values[i];
-    if (!raw) continue;
-    let config: TenantConfig;
-    try {
-      config = JSON.parse(raw);
-    } catch {
-      console.error(JSON.stringify({ event: 'admin.corrupt_tenant_record', tenant_id: page.keys[i].name.replace('tenant:', '') }));
-      continue; // skip corrupt records, don't crash the list
-    }
+  for (const key of withMeta) {
     tenants.push({
-      tenant_id: page.keys[i].name.replace('tenant:', ''),
-      name: config.name,
-      created_at: config.created_at,
+      tenant_id: key.name.replace('tenant:', ''),
+      name: key.metadata!.name,
+      created_at: key.metadata!.created_at,
     });
   }
+  for (const { k, raw } of fetched) {
+    if (!raw) continue;
+    try {
+      const config = JSON.parse(raw) as { name: string; created_at: string };
+      tenants.push({ tenant_id: k.name.replace('tenant:', ''), name: config.name, created_at: config.created_at });
+    } catch {
+      console.error(JSON.stringify({ event: 'admin.corrupt_tenant_record', tenant_id: k.name.replace('tenant:', '') }));
+    }
+  }
+  // Restore original key order (withMeta first, then withoutMeta — sort by original index)
+  const keyOrder = new Map(page.keys.map((k, i) => [k.name, i]));
+  tenants.sort((a, b) => (keyOrder.get(`tenant:${a.tenant_id}`) ?? 0) - (keyOrder.get(`tenant:${b.tenant_id}`) ?? 0));
 
   return jsonOk({
     success: true,
@@ -137,7 +146,6 @@ async function listTenants(request: Request, env: Env): Promise<Response> {
   }, 200, request, env);
 }
 
-// DELETE /admin/tenant?id=xxx
 async function deleteTenant(request: Request, env: Env): Promise<Response> {
   const id = new URL(request.url).searchParams.get('id');
   if (!id) throw new ValidationError('Missing query param: id', ERROR_CODES.INVALID_INPUT);
@@ -148,8 +156,6 @@ async function deleteTenant(request: Request, env: Env): Promise<Response> {
   const existing = await env.EMBEDDING_KV.get(`tenant:${id}`);
   if (!existing) throw new WorkerError(`Tenant '${id}' not found`, ERROR_CODES.NOT_FOUND, 404);
 
-  // Use the reverse index (tenant_keys:<id>:<hash>) to find only this tenant's API keys.
-  // This is O(keys per tenant) instead of O(all api_keys:* in the namespace).
   let tkCursor: string | undefined;
   const apiKeyDeletes: Promise<void>[] = [];
   do {
@@ -165,29 +171,35 @@ async function deleteTenant(request: Request, env: Env): Promise<Response> {
   } while (tkCursor);
   await Promise.all(apiKeyDeletes);
 
-  // Legacy fallback: scan api_keys:* for entries belonging to this tenant that predate
-  // the reverse-index. Without this, keys created before rollout remain valid if the
-  // tenant ID is ever reused.
-  let legacyCursor: string | undefined;
-  const legacyDeletes: Promise<void>[] = [];
-  do {
-    const page = await env.EMBEDDING_KV.list({ prefix: 'api_keys:', limit: 100, cursor: legacyCursor });
-    for (const k of page.keys) {
-      const raw = await env.EMBEDDING_KV.get(k.name);
-      if (raw) {
-        try {
-          const rec: ApiKeyRecord = JSON.parse(raw);
-          if (rec.tenant_id === id) legacyDeletes.push(env.EMBEDDING_KV.delete(k.name));
-        } catch { /* skip corrupt records */ }
+  // Legacy full-scan removed: tenant_keys: reverse index above handles all key cleanup.
+  // If pre-index keys exist, run DELETE /admin/tenant?id=<id>&legacy_cleanup=true once.
+  const legacyCleanup = new URL(request.url).searchParams.get('legacy_cleanup') === 'true';
+  if (legacyCleanup) {
+    // Audit log: this triggers an O(n) full api_keys: scan — visible in production observability.
+    console.warn(JSON.stringify({ event: 'admin.legacy_cleanup_triggered', tenant_id: id }));
+    let legacyCursor: string | undefined;
+    const legacyDeletes: Promise<void>[] = [];
+    do {
+      const page = await env.EMBEDDING_KV.list({ prefix: 'api_keys:', limit: 100, cursor: legacyCursor });
+      const reads = await Promise.all(page.keys.map(k => env.EMBEDDING_KV.get(k.name).then(raw => ({ k, raw }))));
+      for (const { k, raw } of reads) {
+        if (raw) {
+          try {
+            const rec: ApiKeyRecord = JSON.parse(raw);
+            if (rec.tenant_id === id) {
+              console.error(JSON.stringify({ event: 'admin.legacy_key_cleanup', tenant_id: id, key: k.name }));
+              legacyDeletes.push(env.EMBEDDING_KV.delete(k.name));
+            }
+          } catch { /* skip corrupt records */ }
+        }
       }
-    }
-    legacyCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
-  } while (legacyCursor);
-  await Promise.all(legacyDeletes);
+      legacyCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
+    } while (legacyCursor);
+    await Promise.all(legacyDeletes);
+  }
 
   await env.EMBEDDING_KV.delete(`tenant:${id}`);
 
-  // Clean up rate limit keys for this tenant (best-effort, they expire anyway)
   let rlCursor: string | undefined;
   const rlKeys: string[] = [];
   do {
@@ -200,7 +212,6 @@ async function deleteTenant(request: Request, env: Env): Promise<Response> {
   return jsonOk({ success: true, message: `Tenant '${id}' deleted` }, 200, request, env);
 }
 
-// ── Admin router ───────────────────────────────────────────
 export async function handleAdmin(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
   const method = request.method;

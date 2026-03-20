@@ -17,9 +17,13 @@ export function getCorsHeaders(request: Request, env?: Env): Record<string, stri
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Key',
     'Access-Control-Max-Age': String(CORS_MAX_AGE),
-    'Vary': 'Origin',
     'Cache-Control': 'no-store',
   };
+  if (origin) {
+    // Only set Vary: Origin when the request actually has an Origin header.
+    // Setting it unconditionally causes CDN/proxy cache fragmentation on non-browser traffic.
+    headers['Vary'] = 'Origin';
+  }
   if (allowedOrigins.includes(origin)) {
     headers['Access-Control-Allow-Origin'] = origin;
   }
@@ -68,15 +72,21 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
   }
   if (err instanceof RateLimitError) {
     const extra: Record<string, unknown> = {};
-    if (err.retryAfterSeconds !== undefined) extra['retry_after_seconds'] = err.retryAfterSeconds;
+    if (err.retryAfterSeconds !== undefined) {
+      extra['retry_after_seconds'] = err.retryAfterSeconds;
+      headers['Retry-After'] = String(err.retryAfterSeconds);
+    }
     return new Response(
       JSON.stringify({ success: false, errorCode: ERROR_CODES.RATE_LIMIT_EXCEEDED, message: err.message, request_id: requestId, ...extra }),
       { status: 429, headers }
     );
   }
   if (err instanceof ProviderError) {
-    const status = err.status === 429 ? 429 : (err.status >= 400 && err.status < 600 ? err.status : 502);
+    // Always map to 502 for non-429 errors — forwarding upstream 4xx (e.g. 401, 403)
+    // would mislead clients into thinking their own credentials are invalid.
+    const status = err.status === 429 ? 429 : 502;
     const errorCode = err.status === 429 ? ERROR_CODES.RATE_LIMIT_EXCEEDED : ERROR_CODES.PROVIDER_ERROR;
+    if (err.status === 429) headers['Retry-After'] = '60';
     return new Response(
       JSON.stringify({ success: false, errorCode, message: err.message, request_id: requestId }),
       { status, headers }

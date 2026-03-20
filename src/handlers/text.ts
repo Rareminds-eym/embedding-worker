@@ -3,8 +3,8 @@
 import type { Env, RequestContext } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { resolveModel, callTextProvider, VOYAGE } from '../providers';
-import { ERROR_CODES, TEXT_MAX_CHARS } from '../constants';
+import { callTextProvider, OPENAI } from '../providers';
+import { ERROR_CODES, TEXT_MAX_CHARS, MAX_REQUEST_BODY_SIZE } from '../constants';
 import { checkRateLimit } from '../utils/ratelimit';
 
 const SKIP_KEYS = new Set([
@@ -12,8 +12,10 @@ const SKIP_KEYS = new Set([
   'deleted_at', 'deletedAt', 'embedding',
 ]);
 
+// Case-sensitive: intentionally matches lowercase keys only.
+// Mixed-case variants (e.g. ID, UUID) are not skipped — only exact lowercase forms are.
 function shouldSkip(key: string): boolean {
-  return SKIP_KEYS.has(key) || /^_?id$|_id$|^id_|^uuid$|^guid$/i.test(key);
+  return SKIP_KEYS.has(key) || /^_?id$|_id$|^id_|^uuid$|^guid$/.test(key);
 }
 
 function tryParseJsonString(v: string): unknown | null {
@@ -22,35 +24,45 @@ function tryParseJsonString(v: string): unknown | null {
   try { return JSON.parse(v); } catch { return null; }
 }
 
-function extractText(value: unknown, key?: string, depth = 0): string {
-  if (value === null || value === undefined) return '';
+function extractText(value: unknown, key?: string, depth = 0, budget = { left: TEXT_MAX_CHARS }): string {
+  if (budget.left <= 0 || value === null || value === undefined) return '';
   if (depth > 10) return '';
 
   if (typeof value === 'string') {
     const v = value.trim();
     if (!v || v === '[]' || v === '{}') return '';
     const parsed = tryParseJsonString(v);
-    if (parsed !== null) return extractText(parsed, key, depth + 1);
-    return key ? `${key}: ${v}` : v;
+    if (parsed !== null) return extractText(parsed, key, depth + 1, budget);
+    const out = key ? `${key}: ${v}` : v;
+    budget.left -= out.length;
+    return out;
   }
 
-  if (typeof value === 'number') return key ? `${key}: ${value}` : String(value);
+  if (typeof value === 'number') {
+    const out = key ? `${key}: ${value}` : String(value);
+    budget.left -= out.length;
+    return out;
+  }
 
   if (typeof value === 'boolean') {
-    // false intentionally omitted — carries no semantic signal for embeddings
     if (!value) return '';
-    return key ? `${key}: ${value}` : String(value);
+    const out = key ? `${key}: ${value}` : String(value);
+    budget.left -= out.length;
+    return out;
   }
 
   if (Array.isArray(value)) {
-    const items = value.map(item => extractText(item, undefined, depth + 1)).filter(Boolean).join(', ');
+    const items = value
+      .map(item => extractText(item, undefined, depth + 1, budget))
+      .filter(Boolean)
+      .join(', ');
     return items ? (key ? `${key}: ${items}` : items) : '';
   }
 
   if (typeof value === 'object') {
     return Object.entries(value as Record<string, unknown>)
       .filter(([k]) => !shouldSkip(k))
-      .map(([k, v]) => extractText(v, k, depth + 1))
+      .map(([k, v]) => extractText(v, k, depth + 1, budget))
       .filter(Boolean)
       .join(' ');
   }
@@ -68,12 +80,13 @@ export async function handleTextEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
-  await checkRateLimit(ctx.tenantId, 'text', env);
-
   const bodyText = await request.text().catch((err) => {
     console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'text', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
   });
+  if (bodyText.length > MAX_REQUEST_BODY_SIZE) {
+    throw new ValidationError('Request body too large', ERROR_CODES.INVALID_INPUT);
+  }
 
   const body = (() => {
     try { return JSON.parse(bodyText) as Record<string, unknown>; }
@@ -88,7 +101,6 @@ export async function handleTextEmbed(
     if (body.input.length === 0) {
       throw new ValidationError('Input array must not be empty', ERROR_CODES.INVALID_INPUT);
     }
-    // Normalize each item (string or object) then join into one string — single Voyage call
     const parts = (body.input as unknown[]).map(item => normalizeInput(item)).filter(Boolean);
     if (parts.length === 0) {
       throw new ValidationError('Input array produced no embeddable text', ERROR_CODES.INVALID_INPUT);
@@ -97,9 +109,9 @@ export async function handleTextEmbed(
   }
 
   const modelKey = typeof body.model === 'string' ? body.model : undefined;
-  if (modelKey && !VOYAGE.textModelKeys.includes(modelKey)) {
+  if (modelKey) {
     throw new ValidationError(
-      `Invalid model. Must be one of: ${VOYAGE.textModelKeys.join(', ')}`,
+      `model parameter is not supported on this endpoint. Text embeddings always use ${OPENAI.defaultModel}.`,
       ERROR_CODES.INVALID_INPUT
     );
   }
@@ -117,22 +129,24 @@ export async function handleTextEmbed(
     );
   }
 
-  const modelConfig = resolveModel(modelKey);
-  const result = await callTextProvider([text], modelConfig.id, env.VOYAGE_API_KEY, env.OPENAI_API_KEY, ctx.tenantId);
+  if (!env.OPENAI_API_KEY) {
+    throw new WorkerError('OPENAI_API_KEY not configured', ERROR_CODES.INTERNAL_ERROR, 503);
+  }
+
+  await checkRateLimit(ctx.tenantId, 'text', env);
+  const modelConfig = OPENAI.model;
+  const result = await callTextProvider([text], env.OPENAI_API_KEY, ctx.tenantId);
   const embedding = result.data[0].embedding;
   const promptTokens = result.usage?.total_tokens ?? 0;
-  const actualModel = result._model;
-  const actualCostPer1M = result._provider === 'openai' ? 0.02 : modelConfig.costPer1M;
-  const estimatedCost = ((promptTokens / 1_000_000) * actualCostPer1M).toFixed(6);
+  const estimatedCost = parseFloat(((promptTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6));
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.error(JSON.stringify({ event: 'embed.success', endpoint: 'text', tenant_id: ctx.tenantId, tokens: promptTokens, latency_ms, model: actualModel, ...(result._provider !== 'voyage' && { fallback_provider: result._provider }) }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', tenant_id: ctx.tenantId, tokens: promptTokens, latency_ms, model: OPENAI.defaultModel }));
 
   return jsonOk({
     success: true,
     embedding,
-    model: actualModel,
-    ...(result._provider !== 'voyage' && { fallback_provider: result._provider }),
+    model: OPENAI.defaultModel,
     dimensions: embedding.length,
     usage: {
       total_tokens: promptTokens,

@@ -38,11 +38,22 @@ function normalizeInput(input: unknown): ImageInput[] {
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           throw new ValidationError('input.data URL must use http or https scheme', ERROR_CODES.INVALID_INPUT);
         }
-        const PRIVATE_HOST = /^(localhost|0\.0\.0\.0|127\.|10\.\d+\.\d+\.\d+|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|metadata\.google|fc00|fd00|fe80|\[::1\]|\[::ffff:)/i;
+        // Blocks common private/loopback ranges. Covers:
+        //   IPv4: 127.x, 10.x, 192.168.x, 172.16-31.x, 169.254.x (link-local), 0.0.0.0
+        //   IPv6: ::1, fc00::/7 (fc/fd ULA), fe80::/10 (link-local), ::ffff: (v4-mapped)
+        //         both bracket notation [::1] and bare notation ::1
+        //   Cloud metadata: 169.254.169.254 (AWS/GCP/Azure IMDS), metadata.google
+        // RESIDUAL RISK: DNS rebinding — a public hostname could resolve to a private
+        // IP at fetch time. We cannot resolve DNS pre-fetch in a Worker. Mitigation:
+        // the URL is passed to Voyage's API (not fetched by this worker directly),
+        // so the attack surface is Voyage's infrastructure, not ours. If stricter
+        // control is needed, switch to base64-only inputs in production.
+        const PRIVATE_HOST = /^(localhost|0\.0\.0\.0|127\.|10\.\d+\.\d+\.\d+|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|metadata\.google\.internal|169\.254\.169\.254|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|fe80:|::1$|::ffff:|\[::1\]|\[::ffff:|\[f[cd][0-9a-f]{2}:|\[fe80:)/i;
         if (
           PRIVATE_HOST.test(parsed.hostname) ||
           parsed.hostname.endsWith('.internal') ||
-          parsed.hostname.endsWith('.local')
+          parsed.hostname.endsWith('.local') ||
+          parsed.hostname === '0' // bare zero
         ) {
           throw new ValidationError('Private or internal URLs are not permitted', ERROR_CODES.INVALID_INPUT);
         }
@@ -83,8 +94,6 @@ export async function handleImageEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
-  await checkRateLimit(ctx.tenantId, 'image', env);
-
   const bodyText = await request.text().catch((err) => {
     console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'image', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
@@ -114,10 +123,18 @@ export async function handleImageEmbed(
       ERROR_CODES.INVALID_INPUT
     );
   }
+
+  const apiKey = env.VOYAGE_API_KEY;
+  if (!apiKey) {
+    throw new WorkerError('VOYAGE_API_KEY not configured', ERROR_CODES.INTERNAL_ERROR, 503);
+  }
+
+  await checkRateLimit(ctx.tenantId, 'image', env);
+
   const modelConfig = resolveImageModel(modelKey);
-  const result = await callImageProvider(buildVoyageInputs(inputs), modelConfig.id, env.VOYAGE_API_KEY, ctx.tenantId);
+  const result = await callImageProvider(buildVoyageInputs(inputs), modelConfig.id, apiKey, ctx.tenantId);
   const totalTokens = result.usage?.total_tokens ?? 0;
-  const estimatedCost = ((totalTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6);
+  const estimatedCost = parseFloat(((totalTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6));
 
   const embeddings: EmbeddingItem[] = result.data.map(item => ({
     index: item.index,
@@ -126,7 +143,7 @@ export async function handleImageEmbed(
   }));
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.error(JSON.stringify({ event: 'embed.success', endpoint: 'image', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: modelConfig.id, count: embeddings.length }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'image', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: modelConfig.id, count: embeddings.length }));
 
   return jsonOk({
     success: true,

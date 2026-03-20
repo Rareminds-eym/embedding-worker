@@ -3,7 +3,7 @@
 import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { resolveModel, callDocProvider, VOYAGE } from '../providers';
+import { callDocProvider, OPENAI } from '../providers';
 import {
   MAX_DOC_REQUEST_BODY_SIZE,
   MAX_DOC_BINARY_SIZE,
@@ -50,18 +50,14 @@ function chunkText(text: string): string[] {
       const lastBreak = slice.lastIndexOf('\n\n');
       if (lastBreak > DOC_CHUNK_SIZE / 2) slice = slice.slice(0, lastBreak);
     }
-
     const trimmed = slice.trim();
     if (trimmed.length > 0) chunks.push(trimmed);
 
-    // If we consumed the entire remaining text, stop
     if (start + slice.length >= text.length) break;
 
-    // Advance by (slice.length - DOC_CHUNK_OVERLAP): overlaps back by DOC_CHUNK_OVERLAP chars
-    // so context is preserved across chunk boundaries. When a paragraph break shortens the
-    // slice, this naturally lands just before the break — no chars are skipped.
-    // Floor at 1 to prevent an infinite loop if a slice is somehow empty after trimming.
-    const advance = Math.max(slice.length - DOC_CHUNK_OVERLAP, 1);
+    // Minimum advance is DOC_CHUNK_SIZE/4 to prevent near-crawl when slice is
+    // shorter than DOC_CHUNK_OVERLAP, which would otherwise advance 1 char at a time.
+    const advance = Math.max(slice.length - DOC_CHUNK_OVERLAP, Math.ceil(DOC_CHUNK_SIZE / 4));
     start += advance;
   }
 
@@ -73,8 +69,6 @@ export async function handleDocEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
-  await checkRateLimit(ctx.tenantId, 'doc', env);
-
   const bodyText = await request.text().catch((err) => {
     console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'doc', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
@@ -93,9 +87,9 @@ export async function handleDocEmbed(
   }
 
   const modelKey = typeof body.model === 'string' ? body.model : undefined;
-  if (modelKey && !VOYAGE.textModelKeys.includes(modelKey)) {
+  if (modelKey) {
     throw new ValidationError(
-      `Invalid model. Must be one of: ${VOYAGE.textModelKeys.join(', ')}`,
+      `model parameter is not supported on this endpoint. Document embeddings always use ${OPENAI.defaultModel}.`,
       ERROR_CODES.INVALID_INPUT
     );
   }
@@ -124,11 +118,18 @@ export async function handleDocEmbed(
   if (typeof input.data !== 'string' || input.data.trim().length === 0) {
     throw new ValidationError('input.data must be a non-empty base64 string', ERROR_CODES.INVALID_INPUT);
   }
+  // Reject oversized base64 strings before the expensive atob + Uint8Array allocation.
+  // ceil(MAX_DOC_BINARY_SIZE * 4/3) accounts for base64 encoding overhead (~33%).
+  const MAX_BASE64_LEN = Math.ceil(MAX_DOC_BINARY_SIZE * 4 / 3) + 4;
+  if (input.data.length > MAX_BASE64_LEN) {
+    throw new ValidationError('input.data exceeds maximum encoded size', ERROR_CODES.INVALID_INPUT);
+  }
 
   const docType = ALLOWED_DOC_TYPES[mimeType as AllowedDocMimeType];
-  const filename = typeof input.filename === 'string' && input.filename.trim().length > 0
+  const rawFilename = typeof input.filename === 'string' && input.filename.trim().length > 0
     ? input.filename.trim()
     : `document.${docType.ext}`;
+  const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 255);
 
   let binaryData: Uint8Array;
   try {
@@ -203,12 +204,12 @@ export async function handleDocEmbed(
   let pagesDetected: number | undefined;
   let pagesProcessed: number | undefined;
 
-  // Worst-case advance per chunk is (DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP) — the normal
-  // sliding-window stride. Paragraph-break chunks advance less, so this is the upper bound
-  // on chars covered across DOC_MAX_CHUNKS chunks.
-  const maxProcessableChars = DOC_MAX_CHUNKS * (DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP);
+  // Use the same minimum advance as chunkText (DOC_CHUNK_SIZE / 4 = 2000) so the
+  // size gate and the chunker agree. The old value (ceil(8000/2) - 400 = 3600) was
+  // more conservative than necessary and could reject processable documents.
+  const minAdvancePerChunk = Math.ceil(DOC_CHUNK_SIZE / 4);
+  const maxProcessableChars = DOC_MAX_CHUNKS * minAdvancePerChunk; // 50 * 2000 = 100_000
 
-  // Early rejection when no page limit is set — avoids allocating limitToPages on oversized docs
   if (maxPages === undefined && markdown.length > maxProcessableChars) {
     throw new ValidationError(
       `Document too large: ${markdown.length} chars exceeds maximum of ${maxProcessableChars}. Split the document and send in parts.`,
@@ -237,15 +238,18 @@ export async function handleDocEmbed(
     throw new ValidationError('Document produced no embeddable chunks', ERROR_CODES.INVALID_INPUT);
   }
 
-  const modelConfig = resolveModel(modelKey);
-  const result = await callDocProvider(chunks, modelConfig.id, env.VOYAGE_API_KEY, env.OPENAI_API_KEY, ctx.tenantId);
+  if (!env.OPENAI_API_KEY) {
+    throw new WorkerError('OPENAI_API_KEY not configured', ERROR_CODES.INTERNAL_ERROR, 503);
+  }
+
+  await checkRateLimit(ctx.tenantId, 'doc', env);
+
+  const result = await callDocProvider(chunks, env.OPENAI_API_KEY, ctx.tenantId);
   const totalTokens = result.total_tokens;
-  const actualModel = result._model;
-  const actualCostPer1M = result._provider === 'openai' ? 0.02 : modelConfig.costPer1M;
-  const estimatedCost = ((totalTokens / 1_000_000) * actualCostPer1M).toFixed(6);
+  const estimatedCost = parseFloat(((totalTokens / 1_000_000) * OPENAI.model.costPer1M).toFixed(6));
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.error(JSON.stringify({ event: 'embed.success', endpoint: 'doc', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: actualModel, chunks: chunks.length, ...(result._provider !== 'voyage' && { fallback_provider: result._provider }) }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: OPENAI.defaultModel, chunks: chunks.length }));
 
   return jsonOk({
     success: true,
@@ -254,8 +258,7 @@ export async function handleDocEmbed(
       embedding: item.embedding,
       dimensions: item.embedding.length,
     })),
-    model: actualModel,
-    ...(result._provider !== 'voyage' && { fallback_provider: result._provider }),
+    model: OPENAI.defaultModel,
     document: {
       filename,
       mimeType,

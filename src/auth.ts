@@ -5,7 +5,6 @@ import { AuthError } from './types';
 import { sha256 } from './utils/hash';
 // Bearer sk_<48 lowercase hex chars>
 const TOKEN_REGEX = /^sk_[a-f0-9]{48}$/;
-
 export async function authenticate(request: Request, env: Env, requestId: string): Promise<RequestContext> {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
@@ -39,7 +38,6 @@ export async function authenticate(request: Request, env: Env, requestId: string
     throw new AuthError('Invalid API key', 'UNAUTHORIZED');
   }
 
-  // Verify the tenant record still exists (guards against deleted tenants with live keys)
   const tenantExists = await env.EMBEDDING_KV.get(`tenant:${keyRecord.tenant_id}`, { type: 'text', cacheTtl: 60 });
   if (!tenantExists) {
     throw new AuthError('Tenant not found', 'UNAUTHORIZED');
@@ -55,18 +53,16 @@ export async function authenticate(request: Request, env: Env, requestId: string
 export async function authenticateAdmin(request: Request, env: Env): Promise<void> {
   const key = request.headers.get('X-Admin-Key') ?? '';
   const expected = env.ADMIN_KEY ?? '';
-  // Fail-closed: reject immediately if either side is empty
   if (key.length === 0 || expected.length === 0) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
   }
-  // Hash both sides with SHA-256 — always 32-byte output, safe for timingSafeEqual.
-  // No HMAC key needed: the goal is purely constant-time comparison, not MAC authentication.
   const enc = new TextEncoder();
   const [hashA, hashB] = await Promise.all([
     crypto.subtle.digest('SHA-256', enc.encode(key)),
     crypto.subtle.digest('SHA-256', enc.encode(expected)),
   ]);
-  if (!(await crypto.subtle.timingSafeEqual(hashA, hashB))) {
+  // timingSafeEqual is synchronous — do not await
+  if (!crypto.subtle.timingSafeEqual(hashA, hashB)) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
   }
 }

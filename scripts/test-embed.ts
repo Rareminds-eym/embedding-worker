@@ -82,10 +82,7 @@ async function testTextEmbed() {
       const emb = data.embedding as number[];
       if (typeof data.dimensions === 'number' && emb.length !== data.dimensions)
         fail(`plain string → dimensions mismatch: declared=${data.dimensions} actual=${emb.length}`);
-      else {
-
-        pass(`plain string → embedding (model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''})`);
-      }
+      else pass(`plain string → embedding (model=${data.model})`);
     } else fail('plain string', data);
   }
 
@@ -95,10 +92,7 @@ async function testTextEmbed() {
       input: { name: 'Jane Smith', title: 'Senior Backend Engineer', skills: ['Rust', 'Go', 'PostgreSQL'] },
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.embedding)) {
-
-      pass(`object input → embedding (model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''})`);
-    }
+    if (res.ok && Array.isArray(data.embedding)) pass(`object input → embedding (model=${data.model})`);
     else fail('object input', data);
   }
 
@@ -108,10 +102,7 @@ async function testTextEmbed() {
       input: ['machine learning', 'natural language processing', 'vector databases'],
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.embedding)) {
-
-      pass(`string array → single embedding (model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''})`);
-    }
+    if (res.ok && Array.isArray(data.embedding)) pass(`string array → single embedding (model=${data.model})`);
     else fail('string array', data);
   }
 
@@ -121,10 +112,7 @@ async function testTextEmbed() {
       input: ['Python developer', { skill: 'FastAPI', years: 3 }, 'REST API design'],
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.embedding)) {
-
-      pass(`mixed array → single embedding (model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''})`);
-    }
+    if (res.ok && Array.isArray(data.embedding)) pass(`mixed array → single embedding (model=${data.model})`);
     else fail('mixed array', data);
   }
 
@@ -134,22 +122,16 @@ async function testTextEmbed() {
       input: '{"role":"engineer","department":"platform","level":"senior"}',
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.embedding)) {
-
-      pass(`stringified JSON → embedding (model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''})`);
-    }
+    if (res.ok && Array.isArray(data.embedding)) pass(`stringified JSON → embedding (model=${data.model})`);
     else fail('stringified JSON', data);
   }
 
-  // Model override
+  // model param rejected — text always uses OpenAI, no override
   {
     const res = await post('/embeddings/text', { input: 'hello world', model: 'voyage-4-lite' }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && (data.model === 'voyage-4-lite' || data.fallback_provider === 'openai')) {
-
-      pass(`model override → ${data.model}`);
-    }
-    else fail('model override', data);
+    if (res.status === 400) pass('model param → 400 (not supported)');
+    else fail('model param should be 400', data);
   }
 
   // X-Request-ID passthrough
@@ -196,7 +178,6 @@ async function testTextEmbed() {
     if (res.status === 400 && data.errorCode === 'INVALID_INPUT') pass('invalid model → 400');
     else fail('invalid model', data);
   }
-
   {
     const res = await post('/embeddings/text', { input: '' }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
@@ -347,11 +328,11 @@ async function testDocEmbed() {
     else fail('max_pages=0 should be 400', await res.json());
   }
 
-  // Invalid model (image model on doc endpoint)
+  // Invalid model (any model param on doc endpoint is rejected)
   {
     const res = await post('/embeddings/doc', { input: { mimeType: 'application/pdf', data: 'dGVzdA==' }, model: 'voyage-multimodal-3.5' }, 'bearer');
-    if (res.status === 400) pass('image model on doc → 400');
-    else fail('image model on doc should be 400', await res.json());
+    if (res.status === 400) pass('model param on doc → 400');
+    else fail('model param on doc should be 400', await res.json());
   }
 
   // Missing input entirely
@@ -379,22 +360,8 @@ async function testDocEmbed() {
     const data = await res.json() as Record<string, unknown>;
     if (res.ok && Array.isArray(data.embeddings)) {
       const doc = data.document as Record<string, unknown>;
-
-      pass(`PDF → ${(data.embeddings as unknown[]).length} chunk(s), model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''}, chars=${doc?.total_chars}`);
+      pass(`PDF → ${(data.embeddings as unknown[]).length} chunk(s), model=${data.model}, chars=${doc?.total_chars}`);
     } else fail('PDF embed', data);
-  }
-
-  // Model override on single-chunk
-  {
-    const res = await post('/embeddings/doc', {
-      input: { mimeType: 'application/pdf', data: pdfBase64 },
-      model: 'voyage-4-lite',
-    }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
-    if (res.ok && data.model === 'voyage-4-lite') {
-
-      pass(`model override → ${data.model}`);
-    } else fail('model override', data);
   }
 
   // max_pages=1
@@ -404,13 +371,11 @@ async function testDocEmbed() {
       max_pages: 1,
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.embeddings)) {
-
-      pass('max_pages=1 → ok');
-    } else fail('max_pages', data);
+    if (res.ok && Array.isArray(data.embeddings)) pass('max_pages=1 → ok');
+    else fail('max_pages', data);
   }
 
-  // ── max_pages=3 tests — reuse the already-fetched pdfBase64, no extra network calls ──
+  // ── max_pages=3 tests ──────────────────────────────────────────────────────
 
   // Structural integrity: contiguous indexes, uniform dimensions, doc.chunks matches embedding count
   {
@@ -434,22 +399,7 @@ async function testDocEmbed() {
       if (!contiguous) fail(`max_pages=3 → indexes not contiguous: ${JSON.stringify(indexes)}`);
       else if (!uniformDims) fail(`max_pages=3 → mixed dimensions: ${JSON.stringify([...new Set(dims)])}`);
       else if (!chunksMatch) fail(`max_pages=3 → doc.chunks=${doc?.chunks} but got ${chunkCount} embeddings`);
-      else pass(`max_pages=3 → ${chunkCount} chunk(s), dims=${dims[0]}, chars=${doc?.total_chars}, model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''}`);
-    }
-  }
-
-  // model override with max_pages=3
-  {
-    const res = await post('/embeddings/doc', {
-      input: { mimeType: 'application/pdf', data: pdfBase64, filename: 'multi-model.pdf' },
-      model: 'voyage-4-lite',
-      max_pages: 3,
-    }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
-    if (res.ok && Array.isArray(data.embeddings)) {
-      pass(`max_pages=3 model override → ${(data.embeddings as unknown[]).length} chunk(s), model=${data.model}${data.fallback_provider ? ', fallback=' + data.fallback_provider : ''}`);
-    } else {
-      fail('max_pages=3 model override', { status: res.status, errorCode: (data as Record<string, unknown>).errorCode });
+      else pass(`max_pages=3 → ${chunkCount} chunk(s), dims=${dims[0]}, chars=${doc?.total_chars}, model=${data.model}`);
     }
   }
 

@@ -4,29 +4,25 @@ import type { Env } from '../types';
 import { RateLimitError } from '../types';
 import { RATE_LIMIT_WINDOW_SECONDS, RATE_LIMITS } from '../constants';
 
-/**
- * KV-based sliding window rate limiter.
- * Key: rl:<tenantId>:<endpoint>:<window>
- * Value: request count as string
- *
- * Note: KV is eventually consistent — concurrent requests may read stale counts.
- * This is acceptable for quota protection (catches runaway tenants) but not a
- * hard security boundary. Use Durable Objects if strict enforcement is needed.
- */
 export async function checkRateLimit(
   tenantId: string,
   endpoint: string,
   env: Env,
 ): Promise<void> {
   const limit = RATE_LIMITS[endpoint as 'text' | 'image' | 'doc'];
-  if (!limit) return; // no limit configured for this endpoint
+  if (!limit) return;
 
   const window = Math.floor(Date.now() / 1000 / RATE_LIMIT_WINDOW_SECONDS);
   const key = `rl:${tenantId}:${endpoint}:${window}`;
 
+  // NOTE: Non-atomic read-modify-write. Cloudflare KV does not support atomic
+  // increments. Under concurrent load for the same tenant/endpoint/window, two
+  // requests can both read the same count and both write count+1, meaning the
+  // effective limit may be exceeded by the degree of concurrency. This is an
+  // accepted trade-off given KV's consistency model. For strict enforcement,
+  // migrate this to a Durable Object with an in-memory counter.
   const raw = await env.EMBEDDING_KV.get(key);
   const parsed = raw ? parseInt(raw, 10) : 0;
-  // Guard against corrupted KV values — NaN >= limit is false, which would silently bypass the limit
   const count = Number.isFinite(parsed) ? parsed : 0;
 
   if (count >= limit) {
@@ -38,6 +34,5 @@ export async function checkRateLimit(
     );
   }
 
-  // Increment — TTL slightly longer than window to ensure key expires cleanly
   await env.EMBEDDING_KV.put(key, String(count + 1), { expirationTtl: RATE_LIMIT_WINDOW_SECONDS * 2 });
 }

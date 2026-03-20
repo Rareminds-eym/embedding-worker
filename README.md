@@ -1,6 +1,6 @@
 # Embedding Worker
 
-A multi-tenant embedding API built on Cloudflare Workers. Converts text, images, and documents into vector embeddings using Voyage AI. Designed for the SkillPassports platform.
+A multi-tenant embedding API built on Cloudflare Workers. Converts text, images, and documents into vector embeddings. Designed for the SkillPassports platform.
 
 ---
 
@@ -41,9 +41,11 @@ A multi-tenant embedding API built on Cloudflare Workers. Converts text, images,
 ┌──────────────────┐         ┌─────────────────────────────────┐
 │  EMBEDDING_KV    │         │  providers.ts                   │
 │                  │         │                                 │
-│  tenant:<id>     │         │  Voyage AI                      │
+│  tenant:<id>     │         │  OpenAI via OpenRouter          │
 │  api_keys:<hash> │         │  ├── /v1/embeddings             │
-└──────────────────┘         │  │   used by: text, doc         │
+│  tenant_keys:... │         │      used by: text, doc         │
+│  rl:...          │         │                                 │
+└──────────────────┘         │  Voyage AI                      │
                              │  └── /v1/multimodalembeddings   │
                              │      used by: image             │
                              │                                 │
@@ -60,7 +62,7 @@ A multi-tenant embedding API built on Cloudflare Workers. Converts text, images,
 |---|---|
 | Runtime | Cloudflare Workers (TypeScript) |
 | KV Store | Cloudflare KV (`EMBEDDING_KV`) |
-| Text & Doc Embeddings | Voyage AI — `voyage-4` (default) |
+| Text & Doc Embeddings | OpenAI `text-embedding-3-small` via OpenRouter |
 | Image Embeddings | Voyage AI — `voyage-multimodal-3.5` (default) |
 | Doc → Markdown | Cloudflare Workers AI `toMarkdown` |
 | Local dev port | `9004` |
@@ -73,9 +75,9 @@ A multi-tenant embedding API built on Cloudflare Workers. Converts text, images,
 src/
 ├── index.ts           — entry point, router, CORS, per-route body size guard
 ├── types.ts           — Env, interfaces, error classes
-├── constants.ts       — all limits, timeouts, error codes
-├── providers.ts       — Voyage AI config, model resolvers, HTTP callers
-├── auth.ts            — Bearer token auth + admin key auth
+├── constants.ts       — all limits, timeouts, rate limits, error codes
+├── providers.ts       — provider config, model resolvers, HTTP callers with retry
+├── auth.ts            — Bearer token auth + admin key auth (timing-safe)
 ├── admin.ts           — /admin/* route handlers
 ├── handlers/
 │   ├── text.ts        — POST /embeddings/text
@@ -83,6 +85,7 @@ src/
 │   └── doc.ts         — POST /embeddings/doc
 └── utils/
     ├── hash.ts        — sha256 via Web Crypto API
+    ├── ratelimit.ts   — KV-based sliding window rate limiter (per-tenant)
     └── response.ts    — jsonOk, jsonError, handleError, getCorsHeaders
 ```
 
@@ -93,12 +96,14 @@ src/
 All provider HTTP logic lives exclusively in `providers.ts`. Handlers never touch endpoints, auth headers, or request shapes directly.
 
 ```
-handlers/text.ts  ──→  callTextProvider()  ──→  VOYAGE.textEndpoint
-handlers/doc.ts   ──→  callDocProvider()   ──→  VOYAGE.textEndpoint  (batched)
+handlers/text.ts  ──→  callTextProvider()  ──→  OpenRouter /v1/embeddings
+handlers/doc.ts   ──→  callDocProvider()   ──→  OpenRouter /v1/embeddings  (batched)
 handlers/image.ts ──→  callImageProvider() ──→  VOYAGE.imageEndpoint
 ```
 
-To swap providers, only edit `providers.ts` — no handler files need to change.
+- Text and doc always use OpenAI `text-embedding-3-small` via OpenRouter. There is no fallback or model selection on these endpoints.
+- Image always uses Voyage AI. Model can be overridden via the `model` request field.
+- To swap providers, only edit `providers.ts` — no handler files need to change.
 
 ---
 
@@ -107,8 +112,8 @@ To swap providers, only edit `providers.ts` — no handler files need to change.
 | Variable | Where | Description |
 |---|---|---|
 | `ADMIN_KEY` | Secret | Protects all `/admin/*` routes |
-| `VOYAGE_API_KEY` | Secret | Voyage AI API key |
-| `OPENAI_API_KEY` | Secret | OpenAI via OpenRouter — used as fallback for text and doc endpoints |
+| `VOYAGE_API_KEY` | Secret | Voyage AI API key — required for `/embeddings/image` |
+| `OPENAI_API_KEY` | Secret | OpenAI via OpenRouter — required for `/embeddings/text` and `/embeddings/doc` |
 | `ALLOWED_ORIGINS` | `wrangler.toml` vars | Comma-separated CORS allowlist |
 | `ENVIRONMENT` | `wrangler.toml` vars | `local` / `dev` / `staging` / `production` |
 
@@ -121,12 +126,16 @@ Secrets are set via `.dev.vars` locally and `wrangler secret put` for deployed e
 Namespace: `EMBEDDING_KV`
 
 ```
-api_keys:<sha256(token)>  →  { tenant_id: string, created_at: string }
-tenant:<tenant_id>        →  { name: string, created_at: string }
+tenant:<id>                        →  { name: string, created_at: string }
+api_keys:<sha256(token)>           →  { tenant_id: string, created_at: string }
+tenant_keys:<tenantId>:<sha256>    →  "1"   (reverse index — enables O(n_keys) tenant deletion)
+lock:tenant:<id>                   →  "1"   (TTL 60s — creation lock, best-effort)
+rl:<tenantId>:<endpoint>:<window>  →  count (TTL 120s — rate limit counter)
 ```
 
-- Raw API tokens are never stored — only their SHA-256 hash
-- Deleting a tenant leaves orphan `api_keys:` entries — they fail auth naturally since the tenant record is gone
+- Raw API tokens are never stored — only their SHA-256 hash.
+- Deleting a tenant revokes all its API keys via the `tenant_keys:` reverse index.
+- Rate limit keys expire automatically — no cleanup needed on normal operation.
 
 ---
 
@@ -138,46 +147,33 @@ Authorization: Bearer sk_<48 lowercase hex chars>
   → validate format: /^sk_[a-f0-9]{48}$/
   → sha256(token)
   → KV get api_keys:<hash>  → { tenant_id }
-  → KV get tenant:<id>      → TenantConfig
-  → RequestContext { tenantId, tenant, requestId, startTime }
+  → KV get tenant:<id>      → TenantConfig (confirms tenant not deleted)
+  → RequestContext { tenantId, requestId, startTime }
 ```
 
 **Admin auth:**
 ```
 X-Admin-Key: <value>
-  → compare against env.ADMIN_KEY (string equality)
+  → sha256(provided key) vs sha256(env.ADMIN_KEY)
+  → timing-safe comparison via crypto.subtle.timingSafeEqual
+  → rejects immediately if either side is empty
 ```
 
 ---
 
-## Provider Fallback
+## Rate Limiting
 
-The worker uses OpenAI (`text-embedding-3-small`) via OpenRouter as a fallback provider in the following scenarios:
+Rate limits are enforced per-tenant per-endpoint using a KV sliding window counter. The counter is incremented only after all input validation passes — malformed requests do not consume quota.
 
-**Text endpoint:**
-- Fallback is triggered on `429` (rate limit) or any `ProviderError` from Voyage AI
-- Only works if `OPENAI_API_KEY` is set in secrets
-- When fallback is used, the response includes `"fallback_provider": "openai"` and dimensions will be `1536` instead of `1024`
+| Endpoint | Limit |
+|---|---|
+| `/embeddings/text` | 120 req/min |
+| `/embeddings/image` | 60 req/min |
+| `/embeddings/doc` | 30 req/min |
 
-**Doc endpoint:**
-- Single-chunk documents: Same fallback behavior as text endpoint (Voyage primary, OpenAI on failure)
-- Multi-chunk documents (>1 chunk): Routes directly to OpenAI to guarantee uniform embedding dimensions across all chunks. If `OPENAI_API_KEY` is not set, returns `503 Service Unavailable`
-- When OpenAI is used (fallback or multi-chunk), the response includes `"fallback_provider": "openai"` and dimensions will be `1536` instead of `1024`
+**Important:** KV is eventually consistent — the counter is not atomic. Concurrent bursts can exceed limits by the degree of concurrency. This is a soft quota guard, not a hard security boundary. Use Durable Objects if strict enforcement is required.
 
-**Image endpoint:**
-- No fallback available (OpenAI does not support image embeddings)
-- Always uses Voyage AI
-
-```json
-{
-  "success": true,
-  "embedding": [...],
-  "model": "openai/text-embedding-3-small",
-  "fallback_provider": "openai",
-  "dimensions": 1536,
-  ...
-}
-```
+On limit exceeded, the response includes a `Retry-After` header and `retry_after_seconds` in the body.
 
 ---
 
@@ -190,7 +186,7 @@ Origins are configured per environment in `wrangler.toml` via `ALLOWED_ORIGINS`.
 | local | `http://localhost:5173`, `http://localhost:8788`, `http://127.0.0.1:5173`, `http://127.0.0.1:8788` |
 | dev | `https://dev.skillpassports.com` |
 | staging | `https://stag.skillpassports.com` |
-| production | `https://skillpassport.com`, `https://www.skillpassport.com` |
+| production | `https://skillpassport.com`, `https://www.skillpassports.com` |
 
 ---
 
@@ -198,7 +194,7 @@ Origins are configured per environment in `wrangler.toml` via `ALLOWED_ORIGINS`.
 
 ```typescript
 // Text
-TEXT_MAX_CHARS           = 120_000     // ~30K tokens — respects Voyage 32K context window
+TEXT_MAX_CHARS           = 120_000     // ~30K tokens
 MAX_REQUEST_BODY_SIZE    = 1_000_000   // 1MB
 
 // Image
@@ -215,53 +211,52 @@ DOC_MAX_CHUNKS                = 50           // max chunks per document
 DOC_MAX_PAGES                 = 100          // hard cap on max_pages param
 DOC_MIN_CONTENT_CHARS         = 50           // min chars before image-only error
 ALLOWED_DOC_TYPES             = PDF, Word (.docx), Excel (.xlsx)
+// Max processable chars = DOC_MAX_CHUNKS * (DOC_CHUNK_SIZE / 4) = 50 * 2000 = 100_000
 
 // Provider
-VOYAGE_TIMEOUT_MS    = 30_000   // 30s per Voyage call
-RETRY_DELAY_MS       = 1_000
-MAX_RETRIES          = 3        // retries on 5xx; 429 retries with Retry-After delay
-DOC_BATCH_SIZE       = 10       // chunks per sequential Voyage batch in doc handler
+VOYAGE_TIMEOUT_MS        = 30_000   // 30s per provider call
+RETRY_DELAY_MS           = 1_000
+MAX_RETRIES              = 3        // retries on 5xx and 429 (with Retry-After delay)
+DOC_BATCH_SIZE           = 10       // chunks per OpenRouter batch in doc handler
+MAX_DOC_BATCH_CONCURRENCY = 4       // concurrent batch requests in doc handler
 ```
 
 ---
 
-## Voyage AI Models
+## Models
 
-| Model | Used For | Dimensions | Cost per 1M tokens |
-|---|---|---|---|
-| `voyage-4` | text, doc (default) | 1024 | $0.06 |
-| `voyage-4-lite` | text, doc (cheaper) | 1024 | $0.02 |
-| `voyage-4-large` | text, doc (highest quality) | 1024 | $0.12 |
-| `voyage-multimodal-3.5` | image (default) | 1024 | $0.12 |
-| `voyage-multimodal-3` | image (legacy) | 1024 | $0.12 |
+### Text & Doc — OpenAI via OpenRouter
 
-Text and doc endpoints only accept text models. Image endpoint only accepts image models. Passing a model from the wrong group returns a 400.
+Text and doc endpoints always use `openai/text-embedding-3-small`. The `model` parameter is not accepted on these endpoints — passing it returns a 400.
+
+| Model | Dimensions | Cost per 1M tokens |
+|---|---|---|
+| `text-embedding-3-small` | 1536 | $0.02 |
+
+### Image — Voyage AI
+
+| Model | Dimensions | Cost per 1M tokens |
+|---|---|---|
+| `voyage-multimodal-3.5` | 1024 | $0.12 (default) |
+| `voyage-multimodal-3` | 1024 | $0.12 |
 
 ---
 
 ## Input Guide
 
-This section covers every accepted input format for each endpoint with real-world examples. Read this before implementing.
-
 ---
 
 ### Text Endpoint Inputs
 
-The `input` field accepts three shapes: a plain string, an object, or an array. The API sanitizes all non-string inputs automatically — you don't need to stringify anything yourself.
+The `input` field accepts a plain string, an object, or an array. The API normalizes all non-string inputs automatically.
 
 #### Plain string
-
-The simplest case. Pass any text directly.
 
 ```json
 { "input": "Software engineer with 5 years of experience in React and Node.js" }
 ```
 
-Use this for: search queries, short descriptions, sentences, paragraphs.
-
----
-
-#### Object (most common for structured data)
+#### Object
 
 Pass any JSON object. The API recursively extracts all meaningful text values and joins them into a single string before embedding.
 
@@ -277,66 +272,20 @@ Pass any JSON object. The API recursively extracts all meaningful text values an
 }
 ```
 
-What gets embedded: `name: Jane Smith title: Senior Backend Engineer bio: Passionate about distributed systems and Rust. skills: Rust, Go, PostgreSQL, Kubernetes location: Berlin, Germany`
-
-**Fields that are automatically skipped:**
-- Any key containing `id` (e.g. `user_id`, `tenant_id`, `uuid`, `_id`, `jobId`) — these are identifiers, not semantic content
+**Fields automatically skipped:**
+- Keys containing `id` (e.g. `user_id`, `uuid`, `_id`, `jobId`)
 - Timestamp fields: `created_at`, `updated_at`, `createdAt`, `updatedAt`, `deleted_at`, `deletedAt`
-- Fields named `embedding` — avoids accidentally re-embedding an existing vector
-- Boolean `false` values — only `true` booleans are included
+- Fields named `embedding`
+- Boolean `false` values
 
-```json
-{
-  "input": {
-    "user_id": "abc-123",        ← skipped (contains 'id')
-    "created_at": "2024-01-01",  ← skipped (timestamp)
-    "embedding": [0.1, 0.2],     ← skipped (embedding field)
-    "active": false,             ← skipped (false boolean)
-    "name": "Bob",               ← included
-    "role": "admin",             ← included
-    "active": true               ← included as "active: true"
-  }
-}
-```
-
-**Nested objects** are fully supported:
-
-```json
-{
-  "input": {
-    "profile": {
-      "name": "Alice",
-      "headline": "Product Designer"
-    },
-    "company": {
-      "name": "Acme Corp",
-      "industry": "SaaS"
-    },
-    "tags": ["UX", "Figma", "Design Systems"]
-  }
-}
-```
-
-**Nested JSON strings** are automatically parsed:
-
-```json
-{
-  "input": "{\"role\": \"engineer\", \"department\": \"platform\", \"level\": \"senior\"}"
-}
-```
-
-The string is detected as JSON, parsed, and extracted — same result as passing the object directly.
-
----
+**Nested objects and nested JSON strings** are fully supported and recursively extracted.
 
 #### Array
 
-Pass an array of strings or objects. All items are normalized and joined into one string for a single embedding call.
+All items are normalized and joined into one string for a single embedding call.
 
 ```json
-{
-  "input": ["machine learning", "natural language processing", "vector databases"]
-}
+{ "input": ["machine learning", "natural language processing", "vector databases"] }
 ```
 
 Mixed arrays (strings and objects) also work:
@@ -353,37 +302,17 @@ Mixed arrays (strings and objects) also work:
 
 ---
 
-#### Model selection
-
-```json
-{ "input": "some text", "model": "voyage-4-lite" }
-```
-
-| Model | Dimensions | Cost | When to use |
-|---|---|---|---|
-| `voyage-4` | 1024 | $0.06/1M | default, best quality |
-| `voyage-4-lite` | 1024 | $0.02/1M | high volume, cost-sensitive |
-| `voyage-4-large` | 1024 | $0.12/1M | highest quality |
----
-
 ### Image Endpoint Inputs
 
-Each image input is an object with `type` and `data`. You can pass a single image or a batch of up to 5.
+Each image input is an object with `type` and `data`. Pass a single image or a batch of up to 5.
 
 #### Single image via URL
 
 ```json
 {
-  "input": {
-    "type": "url",
-    "data": "https://example.com/photo.jpg"
-  }
+  "input": { "type": "url", "data": "https://example.com/photo.jpg" }
 }
 ```
-
-The URL must be publicly accessible. The host must return a `Content-Length` header (required by Voyage AI).
-
----
 
 #### Single image via base64
 
@@ -398,48 +327,26 @@ The URL must be publicly accessible. The host must return a `Content-Length` hea
 ```
 
 - `data` — raw base64 string, no `data:image/jpeg;base64,` prefix
-- `mediaType` — must be one of: `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/bmp`
-
-**How to get base64 in JavaScript:**
-```javascript
-// From a File object (browser)
-const toBase64 = (file) => new Promise((resolve, reject) => {
-  const reader = new FileReader();
-  reader.onload = () => resolve(reader.result.split(',')[1]); // strip the data URI prefix
-  reader.onerror = reject;
-  reader.readAsDataURL(file);
-});
-
-// From a file path (Node.js)
-const fs = require('fs');
-const base64 = fs.readFileSync('image.jpg').toString('base64');
-```
-
----
+- `mediaType` — one of: `image/jpeg`, `image/png`, `image/gif`, `image/webp`, `image/bmp`
 
 #### Batch (up to 5 images)
-
-Pass an array. Items can mix URLs and base64.
 
 ```json
 {
   "input": [
     { "type": "url", "data": "https://example.com/photo1.jpg" },
-    { "type": "url", "data": "https://example.com/photo2.jpg" },
     { "type": "base64", "mediaType": "image/png", "data": "iVBORw0KGgo..." }
   ]
 }
 ```
 
-Batch response returns `embeddings` array (indexed) instead of a single `embedding`.
+Batch response returns an `embeddings` array (indexed) instead of a single `embedding`.
 
----
+#### Model selection
 
-#### Image size limits
-
-- Max 20MB per image (base64 or URL)
-- Max ~4000×4000 pixels (16 million pixels)
-- Token cost: every 560 pixels = 1 token
+```json
+{ "input": { "type": "url", "data": "..." }, "model": "voyage-multimodal-3" }
+```
 
 ---
 
@@ -459,9 +366,9 @@ Documents must be base64-encoded. The API converts them to markdown internally, 
 }
 ```
 
-- `mimeType` — required, must match the actual file type (see table below)
+- `mimeType` — required, must match the actual file type
 - `data` — required, base64-encoded file content
-- `filename` — optional, used for logging; defaults to `document.pdf` / `document.docx` / `document.xlsx`
+- `filename` — optional, used for logging; defaults to `document.<ext>`
 
 **Supported types:**
 
@@ -471,136 +378,56 @@ Documents must be base64-encoded. The API converts them to markdown internally, 
 | Word (.docx) | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
 | Excel (.xlsx) | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
 
----
-
 #### With page limit
-
-Use `max_pages` to limit how many pages are processed. Useful for large documents where you only need the first N pages (e.g. a CV, executive summary, first chapter).
 
 ```json
 {
-  "input": {
-    "mimeType": "application/pdf",
-    "data": "<base64>",
-    "filename": "report.pdf"
-  },
+  "input": { "mimeType": "application/pdf", "data": "<base64>", "filename": "report.pdf" },
   "max_pages": 5
 }
 ```
 
 - Integer, 1–100
-- Page boundaries are detected via form-feed characters (`\f`) in the extracted text
-- If no form-feeds exist, the API estimates pages at 3,000 chars/page
-- Response includes `pages_detected` and `pages_processed` when this param is set
-
----
-
-#### With model selection
-
-```json
-{
-  "input": {
-    "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "data": "<base64>",
-    "filename": "job_description.docx"
-  },
-  "model": "voyage-4-lite"
-}
-```
-
----
+- Page boundaries detected via form-feed characters (`\f`) in extracted text
+- If no form-feeds exist, pages estimated at 3,000 chars/page
+- Response includes `pages_detected` and `pages_processed` when set
 
 #### How to base64-encode a file
 
-**JavaScript (Node.js):**
+**Node.js:**
 ```javascript
 const fs = require('fs');
-
-const fileBuffer = fs.readFileSync('resume.pdf');
-const base64 = fileBuffer.toString('base64');
-
-const body = {
-  input: {
-    mimeType: 'application/pdf',
-    data: base64,
-    filename: 'resume.pdf'
-  }
-};
+const base64 = fs.readFileSync('resume.pdf').toString('base64');
+const body = { input: { mimeType: 'application/pdf', data: base64, filename: 'resume.pdf' } };
 ```
 
-**JavaScript (browser — File input):**
+**Browser (File input):**
 ```javascript
 async function encodeFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result.split(',')[1]); // strip data URI prefix
+    reader.onload = () => resolve(reader.result.split(',')[1]);
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
 }
-
-const fileInput = document.querySelector('input[type="file"]');
-const file = fileInput.files[0];
-const base64 = await encodeFile(file);
-
-const body = {
-  input: {
-    mimeType: file.type,
-    data: base64,
-    filename: file.name
-  }
-};
+const base64 = await encodeFile(fileInput.files[0]);
 ```
 
 **Python:**
 ```python
 import base64
-
 with open('resume.pdf', 'rb') as f:
     b64 = base64.b64encode(f.read()).decode('utf-8')
-
-body = {
-    'input': {
-        'mimeType': 'application/pdf',
-        'data': b64,
-        'filename': 'resume.pdf'
-    }
-}
 ```
-
----
 
 #### Understanding the chunked response
 
-Large documents are split into overlapping chunks (8,000 chars each, 400-char overlap). Each chunk gets its own embedding. You get back an array:
-
-```json
-{
-  "embeddings": [
-    { "index": 0, "embedding": [...], "dimensions": 1024 },
-    { "index": 1, "embedding": [...], "dimensions": 1024 },
-    { "index": 2, "embedding": [...], "dimensions": 1024 }
-  ]
-}
-```
-
-When storing in a vector database, store each chunk embedding separately with metadata linking it back to the source document (e.g. `{ doc_id, chunk_index, filename }`). At query time, search across all chunks and group results by `doc_id`.
-
----
+Large documents are split into overlapping chunks (8,000 chars, 400-char overlap). Each chunk gets its own embedding. Store each chunk separately in your vector DB with metadata linking back to the source document (`doc_id`, `chunk_index`, `filename`). At query time, search across all chunks and group by `doc_id`.
 
 #### Image-only PDFs
 
-`toMarkdown` extracts the text layer only. If a PDF has no text layer (scanned document, image-only), the API returns a 400 error:
-
-```json
-{
-  "success": false,
-  "errorCode": "INVALID_INPUT",
-  "message": "Document produced no extractable text. This PDF appears to be image-only (scanned). Use /embeddings/image to embed individual page images instead."
-}
-```
-
-For scanned PDFs, render each page as a JPEG/PNG image and send them to `/embeddings/image` instead.
+`toMarkdown` extracts the text layer only. Scanned/image-only PDFs return a 400 directing you to `/embeddings/image` instead.
 
 ---
 
@@ -611,11 +438,7 @@ For scanned PDFs, render each page as a JPEG/PNG image and send them to `/embedd
 Public. No auth required.
 
 ```json
-{
-  "status": "ok",
-  "version": "1.0.0",
-  "timestamp": "2026-03-17T08:00:00.000Z"
-}
+{ "status": "ok", "version": "1.0.0", "timestamp": "2026-03-17T08:00:00.000Z" }
 ```
 
 ---
@@ -624,38 +447,32 @@ Public. No auth required.
 
 Auth: `Authorization: Bearer sk_<48hex>`
 
-Embeds a single text input. See [Input Guide — Text](#text-endpoint-inputs) for all accepted formats and sanitization rules.
-
 ```json
 { "input": "plain string" }
 { "input": { "name": "Jane", "title": "Engineer", "skills": ["Python"] } }
 { "input": ["machine learning", "deep learning"] }
-{ "input": ["Python developer", { "skill": "FastAPI", "years": 3 }] }
-{ "input": "...", "model": "voyage-4-lite" }
 ```
+
+The `model` parameter is not supported. Text always uses `openai/text-embedding-3-small`.
 
 Response:
 ```json
 {
   "success": true,
-  "embedding": [0.023, -0.041, ...],
-  "model": "voyage-4",
-  "dimensions": 1024,
-  "usage": {
-    "total_tokens": 12,
-    "estimated_cost_usd": "0.000001"
-  },
-  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "embedding": [0.023, -0.041, 0.017],
+  "model": "openai/text-embedding-3-small",
+  "dimensions": 1536,
+  "usage": { "total_tokens": 12, "estimated_cost_usd": 0.000001 },
+  "request_id": "a1b2c3d4-...",
   "latency_ms": 210
 }
+```
 
 ---
 
 ### POST /embeddings/image
 
 Auth: `Authorization: Bearer sk_<48hex>`
-
-See [Input Guide — Image](#image-endpoint-inputs) for full details on URL vs base64 inputs and batch usage.
 
 **Single image — URL:**
 ```json
@@ -672,39 +489,20 @@ See [Input Guide — Image](#image-endpoint-inputs) for full details on URL vs b
 { "input": [ { "type": "url", "data": "..." }, { "type": "base64", "mediaType": "image/png", "data": "..." } ] }
 ```
 
-Single input response:
+Single response:
 ```json
 {
   "success": true,
-  "embedding": [0.013, -0.057, ...],
+  "embedding": [0.013, -0.057, 0.009],
   "dimensions": 1024,
   "model": "voyage-multimodal-3.5",
-  "usage": { "total_tokens": 89, "estimated_cost_usd": "0.000011" },
-  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "usage": { "total_tokens": 89, "estimated_cost_usd": 0.000011 },
+  "request_id": "a1b2c3d4-...",
   "latency_ms": 691
 }
 ```
 
-Batch response returns `embeddings` array instead of `embedding`:
-```json
-{
-  "success": true,
-  "embeddings": [
-    { "index": 0, "embedding": [...], "dimensions": 1024 },
-    { "index": 1, "embedding": [...], "dimensions": 1024 }
-  ],
-  "model": "voyage-multimodal-3.5",
-  "usage": { "total_tokens": 536, "estimated_cost_usd": "0.000064" },
-  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "latency_ms": 1200
-}
-```
-
-Image limits (enforced by Voyage):
-- Max 20MB per image
-- Max 16 million pixels (~4000×4000)
-- Supported formats: JPEG, PNG, WEBP, GIF, BMP
-- Every 560 pixels = 1 token, max 32,000 tokens per input
+Batch response returns `embeddings` array instead of `embedding`.
 
 ---
 
@@ -712,42 +510,28 @@ Image limits (enforced by Voyage):
 
 Auth: `Authorization: Bearer sk_<48hex>`
 
-See [Input Guide — Doc](#doc-endpoint-inputs) for base64 encoding examples, page limiting, and chunked response handling.
+The `model` parameter is not supported. Doc always uses `openai/text-embedding-3-small`.
 
-**Supported document types:**
-
-| Type | mimeType |
-|---|---|
-| PDF | `application/pdf` |
-| Word | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
-| Excel | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
-
-**Request:**
 ```json
 {
   "input": {
     "mimeType": "application/pdf",
-    "data": "<base64 encoded file>",
+    "data": "<base64>",
     "filename": "resume.pdf"
   },
-  "model": "voyage-4-lite",
   "max_pages": 10
 }
 ```
 
-- `filename` — optional, defaults to `document.<ext>`
-- `model` — optional, defaults to `voyage-4`
-- `max_pages` — optional, integer 1–100
-
-**Response:**
+Response:
 ```json
 {
   "success": true,
   "embeddings": [
-    { "index": 0, "embedding": [...], "dimensions": 1024 },
-    { "index": 1, "embedding": [...], "dimensions": 1024 }
+    { "index": 0, "embedding": [0.031, -0.012, 0.008], "dimensions": 1536 },
+    { "index": 1, "embedding": [-0.004, 0.027, 0.019], "dimensions": 1536 }
   ],
-  "model": "voyage-4",
+  "model": "openai/text-embedding-3-small",
   "document": {
     "filename": "resume.pdf",
     "mimeType": "application/pdf",
@@ -759,23 +543,13 @@ See [Input Guide — Doc](#doc-endpoint-inputs) for base64 encoding examples, pa
     "pages_detected": 7,
     "pages_processed": 5
   },
-  "usage": {
-    "total_tokens": 4303,
-    "estimated_cost_usd": "0.000258"
-  },
-  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "usage": { "total_tokens": 4303, "estimated_cost_usd": 0.000086 },
+  "request_id": "a1b2c3d4-...",
   "latency_ms": 3200
 }
 ```
 
-`pages_detected` / `pages_processed` are only included when `max_pages` is set.
-
-**Doc extraction notes:**
-- `toMarkdown` extracts the text layer only — embedded images within PDFs are ignored
-- PDFs with no text layer (scanned/image-only) return a 400 directing to `/embeddings/image`
-- DOCX tables are preserved as markdown tables; complex PDF table layouts may lose structure but text is captured
-- Excel sheets are converted to markdown tables per sheet
-- Max binary size is 2MB — larger files should be split or use `max_pages`
+`pages_detected` / `pages_processed` only appear when `max_pages` is set.
 
 ---
 
@@ -783,13 +557,11 @@ See [Input Guide — Doc](#doc-endpoint-inputs) for base64 encoding examples, pa
 
 Auth: `X-Admin-Key: <value>`
 
-Creates a new tenant and generates an API key.
-
 ```json
 { "id": "skillpassport", "name": "Skill Passport" }
 ```
 
-`id` must match `/^[a-z0-9][a-z0-9-]{0,61}[a-z0-9]$/` — lowercase alphanumeric and hyphens only. Invalid IDs are rejected with a 400.
+`id` must be lowercase alphanumeric with hyphens, 2–64 chars, cannot start or end with a hyphen.
 
 Response `201`:
 ```json
@@ -801,7 +573,7 @@ Response `201`:
 }
 ```
 
-The `api_key` is returned once only and never stored in plain text.
+The `api_key` is shown once only and never stored in plain text. Save it immediately.
 
 ---
 
@@ -819,7 +591,7 @@ Auth: `X-Admin-Key: <value>`
 
 ---
 
-### GET /admin/tenants
+### GET /admin/tenants?limit=50&cursor=xxx
 
 Auth: `X-Admin-Key: <value>`
 
@@ -834,7 +606,7 @@ Auth: `X-Admin-Key: <value>`
 }
 ```
 
-`count` is the number of tenants in the current page, not the total across all pages. Use `next_cursor` with `?cursor=` to paginate.
+`count` is the number of tenants in the current page. Use `next_cursor` with `?cursor=` to paginate. Max page size is 100.
 
 ---
 
@@ -842,9 +614,13 @@ Auth: `X-Admin-Key: <value>`
 
 Auth: `X-Admin-Key: <value>`
 
+Deletes the tenant and revokes all its API keys.
+
 ```json
 { "success": true, "message": "Tenant 'skillpassport' deleted" }
 ```
+
+For deployments that predate the `tenant_keys:` reverse index, append `?legacy_cleanup=true` to also scan the full `api_keys:` namespace for orphaned keys. This is a one-time migration operation — it is O(total API keys) and will be logged as `admin.legacy_cleanup_triggered`.
 
 ---
 
@@ -856,20 +632,24 @@ All errors follow this shape:
   "success": false,
   "errorCode": "UNAUTHORIZED",
   "message": "Invalid API key",
-  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  "request_id": "a1b2c3d4-..."
 }
 ```
 
 | errorCode | HTTP | Cause |
 |---|---|---|
 | `UNAUTHORIZED` | 401 | Missing/invalid Bearer token or admin key |
-| `INVALID_INPUT` | 400 | Validation failure — see message for details |
-| `PROVIDER_ERROR` | 502 | Voyage AI returned an error after retry |
+| `INVALID_INPUT` | 400 | Validation failure — see `message` for details |
+| `RATE_LIMIT_EXCEEDED` | 429 | Per-tenant rate limit hit — check `Retry-After` header |
+| `PROVIDER_ERROR` | 502 | Upstream provider returned an error after retries |
 | `INTERNAL_ERROR` | 500 | Unexpected server error |
+| `INTERNAL_ERROR` | 503 | Required secret not configured |
 | `INTERNAL_ERROR` | 504 | Document conversion timed out |
-| `NOT_FOUND` | 404 | Route not found |
+| `NOT_FOUND` | 404 | Route or resource not found |
 | `TENANT_EXISTS` | 409 | Tenant ID already taken |
 | `METHOD_NOT_ALLOWED` | 405 | Wrong HTTP method on admin route |
+
+Rate limit responses also include `retry_after_seconds` in the body and a `Retry-After` header.
 
 ---
 
@@ -880,46 +660,38 @@ All errors follow this shape:
 npm install
 ```
 
-**2. Create `.dev.vars`**
+**2. Create a KV namespace**
+```bash
+npm run kv:create:local
+```
+
+Replace `REPLACE_WITH_LOCAL_KV_ID` in `wrangler.toml` with the returned ID (appears twice — `id` and `preview_id`).
+
+**3. Create `.dev.vars`**
 ```
 ADMIN_KEY=local-admin-key
 VOYAGE_API_KEY=pa-...
+OPENAI_API_KEY=sk-or-...
 ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788
 ```
 
-**3. Start dev server**
+**4. Start dev server**
 ```bash
 npm run dev
 # runs on http://127.0.0.1:9004
 ```
 
-**4. Create a tenant**
+**5. Run the test suite**
+```bash
+npm run test
+```
+
+**6. Create a tenant manually**
 ```bash
 curl -X POST http://127.0.0.1:9004/admin/tenant \
   -H "X-Admin-Key: local-admin-key" \
   -H "Content-Type: application/json" \
   -d '{"id":"test","name":"Test Tenant"}'
-```
-
-**5. Test endpoints**
-```bash
-# Text
-curl -X POST http://127.0.0.1:9004/embeddings/text \
-  -H "Authorization: Bearer sk_<key>" \
-  -H "Content-Type: application/json" \
-  -d '{"input":"hello world"}'
-
-# Image (URL)
-curl -X POST http://127.0.0.1:9004/embeddings/image \
-  -H "Authorization: Bearer sk_<key>" \
-  -H "Content-Type: application/json" \
-  -d '{"input":{"type":"url","data":"https://example.com/image.jpg"}}'
-
-# Doc (PDF)
-curl -X POST http://127.0.0.1:9004/embeddings/doc \
-  -H "Authorization: Bearer sk_<key>" \
-  -H "Content-Type: application/json" \
-  -d '{"input":{"mimeType":"application/pdf","data":"<base64>","filename":"doc.pdf"}}'
 ```
 
 ---
@@ -933,12 +705,13 @@ npm run kv:create:staging
 npm run kv:create:production
 ```
 
-Replace the `REPLACE_WITH_*_KV_ID` placeholders in `wrangler.toml` with the returned IDs.
+Replace each `REPLACE_WITH_*_KV_ID` placeholder in `wrangler.toml` with the returned IDs.
 
 **2. Set secrets**
 ```bash
-wrangler secret put ADMIN_KEY      --env production
-wrangler secret put VOYAGE_API_KEY --env production
+wrangler secret put ADMIN_KEY        --env production
+wrangler secret put VOYAGE_API_KEY   --env production
+wrangler secret put OPENAI_API_KEY   --env production
 ```
 
 **3. Deploy**
@@ -948,15 +721,17 @@ npm run deploy:staging    # → embedding-worker (staging env)
 npm run deploy:production # → embedding-worker (production env)
 ```
 
+Each deploy script runs against the environment specified. If any `REPLACE_WITH_*` placeholder is still present in `wrangler.toml`, the worker will start but return `503 Service Unavailable` until the KV namespace IDs are replaced.
+
 ---
 
 ## Swapping Providers
 
-All provider logic is isolated in `providers.ts`. To switch from Voyage AI to another provider:
+All provider logic is isolated in `providers.ts`. To switch from OpenAI/Voyage to another provider:
 
-1. Update the `VOYAGE` config — name, `textEndpoint`, `imageEndpoint`, models, pricing
+1. Update the provider config — endpoint, model IDs, dimensions, pricing
 2. Update the fetch body/response shape in `callTextProvider`, `callDocProvider`, and `callImageProvider`
-3. Rename `VOYAGE_API_KEY` in `types.ts` (`Env` interface) and `wrangler.toml`
+3. Rename the API key env var in `types.ts` (`Env` interface) and `wrangler.toml`
 4. Run `wrangler secret put <NEW_KEY_NAME>`
 
 No changes needed in any handler files.
