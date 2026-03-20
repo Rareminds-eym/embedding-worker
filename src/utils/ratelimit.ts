@@ -6,11 +6,11 @@ import { RATE_LIMIT_WINDOW_SECONDS, RATE_LIMITS } from '../constants';
 
 export async function checkRateLimit(
   tenantId: string,
-  endpoint: string,
+  endpoint: keyof typeof RATE_LIMITS,
   env: Env,
 ): Promise<void> {
-  const limit = RATE_LIMITS[endpoint as 'text' | 'image' | 'doc'];
-  if (!limit) return;
+  const limit = RATE_LIMITS[endpoint];
+  if (limit === undefined) return;
 
   const window = Math.floor(Date.now() / 1000 / RATE_LIMIT_WINDOW_SECONDS);
   const key = `rl:${tenantId}:${endpoint}:${window}`;
@@ -18,7 +18,9 @@ export async function checkRateLimit(
   // NOTE: Non-atomic read-modify-write. Cloudflare KV does not support atomic
   // increments. Under concurrent load for the same tenant/endpoint/window, two
   // requests can both read the same count and both write count+1, meaning the
-  // effective limit may be exceeded by the degree of concurrency. This is an
+  // effective limit may be exceeded by the degree of concurrency. Additionally,
+  // KV enforces a ~1 write/sec per-key limit — the text endpoint (120 req/min)
+  // can exceed this under sustained load, causing put() errors. This is an
   // accepted trade-off given KV's consistency model. For strict enforcement,
   // migrate this to a Durable Object with an in-memory counter.
   const raw = await env.EMBEDDING_KV.get(key);

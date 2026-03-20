@@ -38,7 +38,7 @@ export async function authenticate(request: Request, env: Env, requestId: string
     throw new AuthError('Invalid API key', 'UNAUTHORIZED');
   }
 
-  const tenantExists = await env.EMBEDDING_KV.get(`tenant:${keyRecord.tenant_id}`, { type: 'text', cacheTtl: 60 });
+  const tenantExists = await env.EMBEDDING_KV.get(`tenant:${keyRecord.tenant_id}`);
   if (!tenantExists) {
     throw new AuthError('Tenant not found', 'UNAUTHORIZED');
   }

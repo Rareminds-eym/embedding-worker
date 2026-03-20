@@ -20,11 +20,6 @@ export default {
       console.error(JSON.stringify({ event: 'startup.misconfigured', reason: 'EMBEDDING_KV binding missing', request_id: requestId }));
       return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
     }
-    const kvId = (env.EMBEDDING_KV as unknown as { id?: string }).id ?? '';
-    if (kvId.startsWith('REPLACE_WITH')) {
-      console.error(JSON.stringify({ event: 'startup.misconfigured', reason: 'KV namespace ID not replaced in wrangler.toml', id: kvId, request_id: requestId }));
-      return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
-    }
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: getCorsHeaders(request, env) });

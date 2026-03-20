@@ -102,13 +102,15 @@ async function callWithRetry<T>(
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
 
   for (let attempt = 0; ; attempt++) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new ProviderError(`${ctx.endpointName} provider unreachable`, 502);
     let res: Response;
     try {
       res = await fetch(url, {
         method: 'POST',
         headers: { ...headers, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
+        signal: AbortSignal.timeout(Math.min(VOYAGE_TIMEOUT_MS, remainingMs)),
       });
     } catch (err) {
       if (attempt < MAX_RETRIES) {

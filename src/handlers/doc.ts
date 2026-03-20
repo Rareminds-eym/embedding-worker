@@ -125,6 +125,8 @@ export async function handleDocEmbed(
     throw new ValidationError('input.data exceeds maximum encoded size', ERROR_CODES.INVALID_INPUT);
   }
 
+  await checkRateLimit(ctx.tenantId, 'doc', env);
+
   const docType = ALLOWED_DOC_TYPES[mimeType as AllowedDocMimeType];
   const rawFilename = typeof input.filename === 'string' && input.filename.trim().length > 0
     ? input.filename.trim()
@@ -241,8 +243,6 @@ export async function handleDocEmbed(
   if (!env.OPENAI_API_KEY) {
     throw new WorkerError('OPENAI_API_KEY not configured', ERROR_CODES.INTERNAL_ERROR, 503);
   }
-
-  await checkRateLimit(ctx.tenantId, 'doc', env);
 
   const result = await callDocProvider(chunks, env.OPENAI_API_KEY, ctx.tenantId);
   const totalTokens = result.total_tokens;

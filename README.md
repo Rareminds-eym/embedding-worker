@@ -6,7 +6,7 @@ A multi-tenant embedding API built on Cloudflare Workers. Converts text, images,
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Client Request                           │
 │   POST /embeddings/text | /embeddings/image | /embeddings/doc   │
@@ -71,7 +71,7 @@ A multi-tenant embedding API built on Cloudflare Workers. Converts text, images,
 
 ## File Structure
 
-```
+```text
 src/
 ├── index.ts           — entry point, router, CORS, per-route body size guard
 ├── types.ts           — Env, interfaces, error classes
@@ -85,7 +85,7 @@ src/
 │   └── doc.ts         — POST /embeddings/doc
 └── utils/
     ├── hash.ts        — sha256 via Web Crypto API
-    ├── ratelimit.ts   — KV-based sliding window rate limiter (per-tenant)
+    ├── ratelimit.ts   — KV-based fixed window rate limiter (per-tenant)
     └── response.ts    — jsonOk, jsonError, handleError, getCorsHeaders
 ```
 
@@ -95,7 +95,7 @@ src/
 
 All provider HTTP logic lives exclusively in `providers.ts`. Handlers never touch endpoints, auth headers, or request shapes directly.
 
-```
+```text
 handlers/text.ts  ──→  callTextProvider()  ──→  OpenRouter /v1/embeddings
 handlers/doc.ts   ──→  callDocProvider()   ──→  OpenRouter /v1/embeddings  (batched)
 handlers/image.ts ──→  callImageProvider() ──→  VOYAGE.imageEndpoint
@@ -125,7 +125,7 @@ Secrets are set via `.dev.vars` locally and `wrangler secret put` for deployed e
 
 Namespace: `EMBEDDING_KV`
 
-```
+```text
 tenant:<id>                        →  { name: string, created_at: string }
 api_keys:<sha256(token)>           →  { tenant_id: string, created_at: string }
 tenant_keys:<tenantId>:<sha256>    →  "1"   (reverse index — enables O(n_keys) tenant deletion)
@@ -142,7 +142,8 @@ rl:<tenantId>:<endpoint>:<window>  →  count (TTL 120s — rate limit counter)
 ## Auth Flow
 
 **Tenant auth (embedding routes):**
-```
+
+```text
 Authorization: Bearer sk_<48 lowercase hex chars>
   → validate format: /^sk_[a-f0-9]{48}$/
   → sha256(token)
@@ -152,7 +153,8 @@ Authorization: Bearer sk_<48 lowercase hex chars>
 ```
 
 **Admin auth:**
-```
+
+```text
 X-Admin-Key: <value>
   → sha256(provided key) vs sha256(env.ADMIN_KEY)
   → timing-safe comparison via crypto.subtle.timingSafeEqual
@@ -163,7 +165,7 @@ X-Admin-Key: <value>
 
 ## Rate Limiting
 
-Rate limits are enforced per-tenant per-endpoint using a KV sliding window counter. The counter is incremented only after all input validation passes — malformed requests do not consume quota.
+Rate limits are enforced per-tenant per-endpoint using a KV fixed window counter. The counter is incremented only after all input validation passes — malformed requests do not consume quota.
 
 | Endpoint | Limit |
 |---|---|
@@ -171,7 +173,7 @@ Rate limits are enforced per-tenant per-endpoint using a KV sliding window count
 | `/embeddings/image` | 60 req/min |
 | `/embeddings/doc` | 30 req/min |
 
-**Important:** KV is eventually consistent — the counter is not atomic. Concurrent bursts can exceed limits by the degree of concurrency. This is a soft quota guard, not a hard security boundary. Use Durable Objects if strict enforcement is required.
+**Important:** KV is eventually consistent — the counter is not atomic. Concurrent bursts can exceed limits by the degree of concurrency. KV also enforces a ~1 write/sec per-key limit, which the text endpoint (120 req/min) can exceed under sustained load. This is a soft quota guard, not a hard security boundary. Use Durable Objects if strict enforcement is required.
 
 On limit exceeded, the response includes a `Retry-After` header and `retry_after_seconds` in the body.
 
@@ -456,6 +458,7 @@ Auth: `Authorization: Bearer sk_<48hex>`
 The `model` parameter is not supported. Text always uses `openai/text-embedding-3-small`.
 
 Response:
+
 ```json
 {
   "success": true,
@@ -490,6 +493,7 @@ Auth: `Authorization: Bearer sk_<48hex>`
 ```
 
 Single response:
+
 ```json
 {
   "success": true,
@@ -524,6 +528,7 @@ The `model` parameter is not supported. Doc always uses `openai/text-embedding-3
 ```
 
 Response:
+
 ```json
 {
   "success": true,
@@ -564,6 +569,7 @@ Auth: `X-Admin-Key: <value>`
 `id` must be lowercase alphanumeric with hyphens, 2–64 chars, cannot start or end with a hyphen.
 
 Response `201`:
+
 ```json
 {
   "success": true,
@@ -627,6 +633,7 @@ For deployments that predate the `tenant_keys:` reverse index, append `?legacy_c
 ## Error Reference
 
 All errors follow this shape:
+
 ```json
 {
   "success": false,
@@ -668,7 +675,8 @@ npm run kv:create:local
 Replace `REPLACE_WITH_LOCAL_KV_ID` in `wrangler.toml` with the returned ID (appears twice — `id` and `preview_id`).
 
 **3. Create `.dev.vars`**
-```
+
+```ini
 ADMIN_KEY=local-admin-key
 VOYAGE_API_KEY=pa-...
 OPENAI_API_KEY=sk-or-...
@@ -721,7 +729,7 @@ npm run deploy:staging    # → embedding-worker (staging env)
 npm run deploy:production # → embedding-worker (production env)
 ```
 
-Each deploy script runs against the environment specified. If any `REPLACE_WITH_*` placeholder is still present in `wrangler.toml`, the worker will start but return `503 Service Unavailable` until the KV namespace IDs are replaced.
+Each deploy script runs against the environment specified.
 
 ---
 

@@ -30,13 +30,6 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
     throw new WorkerError(`Tenant '${tenantId}' already exists`, ERROR_CODES.TENANT_EXISTS, 409);
   }
 
-  // KNOWN LIMITATION: This lock is not atomic. Cloudflare KV has no
-  // compare-and-swap / putIfAbsent primitive, so two simultaneous POST
-  // /admin/tenant requests with the same id can both pass the lock check
-  // and both proceed to write, resulting in duplicate key records for the
-  // same tenant. In practice the /admin endpoint is called by operators,
-  // not end-users, so the race window is narrow. For strict prevention,
-  // move tenant creation into a Durable Object.
   const lockKey = `lock:tenant:${tenantId}`;
   const lockHeld = await env.EMBEDDING_KV.get(lockKey);
   if (lockHeld) {
