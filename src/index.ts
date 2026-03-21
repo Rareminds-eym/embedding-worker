@@ -66,22 +66,22 @@ export default {
         const ctx = await authenticate(request, env, requestId);
 
         if (pathname === '/embeddings/text' && request.method === 'POST') {
-          if (!env.OPENAI_API_KEY) {
-            console.error(JSON.stringify({ event: 'misconfigured', reason: 'OPENAI_API_KEY not set', request_id: requestId }));
+          if (!env.GEMINI_API_KEY) {
+            console.error(JSON.stringify({ event: 'misconfigured', reason: 'GEMINI_API_KEY not set', request_id: requestId }));
             return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
           }
           return await handleTextEmbed(request, ctx, env);
         }
         if (pathname === '/embeddings/image' && request.method === 'POST') {
-          if (!env.VOYAGE_API_KEY) {
-            console.error(JSON.stringify({ event: 'misconfigured', reason: 'VOYAGE_API_KEY not set', request_id: requestId }));
+          if (!env.GEMINI_API_KEY) {
+            console.error(JSON.stringify({ event: 'misconfigured', reason: 'GEMINI_API_KEY not set', request_id: requestId }));
             return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
           }
           return await handleImageEmbed(request, ctx, env);
         }
         if (pathname === '/embeddings/doc' && request.method === 'POST') {
-          if (!env.OPENAI_API_KEY) {
-            console.error(JSON.stringify({ event: 'misconfigured', reason: 'OPENAI_API_KEY not set', request_id: requestId }));
+          if (!env.GEMINI_API_KEY) {
+            console.error(JSON.stringify({ event: 'misconfigured', reason: 'GEMINI_API_KEY not set', request_id: requestId }));
             return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
           }
           return await handleDocEmbed(request, ctx, env);

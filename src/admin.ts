@@ -56,6 +56,13 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
     await env.EMBEDDING_KV.put(`tenant:${tenantId}`, JSON.stringify(tenant), {
       metadata: { name: tenant.name, created_at: tenant.created_at },
     });
+  } catch (err) {
+    // Best-effort cleanup of partial writes
+    await Promise.allSettled([
+      env.EMBEDDING_KV.delete(`tenant_keys:${tenantId}:${hash}`),
+      env.EMBEDDING_KV.delete(`api_keys:${hash}`),
+    ]);
+    throw err;
   } finally {
     await env.EMBEDDING_KV.delete(lockKey).catch(() => {});
   }

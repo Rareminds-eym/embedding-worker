@@ -3,7 +3,7 @@
 import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { callDocProvider, OPENAI } from '../providers';
+import { callPdfProvider, callDocProvider, GEMINI } from '../providers';
 import {
   MAX_DOC_REQUEST_BODY_SIZE,
   MAX_DOC_BINARY_SIZE,
@@ -13,11 +13,13 @@ import {
   DOC_MAX_CHUNKS,
   DOC_MAX_PAGES,
   DOC_CHARS_PER_PAGE,
-  DOC_MIN_CONTENT_CHARS,
   ERROR_CODES,
 } from '../constants';
 import { checkRateLimit } from '../utils/ratelimit';
 import type { AllowedDocMimeType } from '../constants';
+
+// PDFs are sent directly to Gemini (native multimodal). Max 6 pages per call.
+const PDF_MIME = 'application/pdf';
 
 function limitToPages(markdown: string, maxPages: number): { text: string; pagesDetected: number; pagesProcessed: number } {
   const formFeeds = markdown.split('\f');
@@ -45,7 +47,6 @@ function chunkText(text: string): string[] {
     const end = start + DOC_CHUNK_SIZE;
     let slice = text.slice(start, end);
 
-    // Try to break at a paragraph boundary, but only in the second half of the slice
     if (end < text.length) {
       const lastBreak = slice.lastIndexOf('\n\n');
       if (lastBreak > DOC_CHUNK_SIZE / 2) slice = slice.slice(0, lastBreak);
@@ -55,8 +56,6 @@ function chunkText(text: string): string[] {
 
     if (start + slice.length >= text.length) break;
 
-    // Minimum advance is DOC_CHUNK_SIZE/4 to prevent near-crawl when slice is
-    // shorter than DOC_CHUNK_OVERLAP, which would otherwise advance 1 char at a time.
     const advance = Math.max(slice.length - DOC_CHUNK_OVERLAP, Math.ceil(DOC_CHUNK_SIZE / 4));
     start += advance;
   }
@@ -86,10 +85,9 @@ export async function handleDocEmbed(
     throw new ValidationError('Missing required field: input', ERROR_CODES.INVALID_INPUT);
   }
 
-  const modelKey = typeof body.model === 'string' ? body.model : undefined;
-  if (modelKey) {
+  if (typeof body.model === 'string') {
     throw new ValidationError(
-      `model parameter is not supported on this endpoint. Document embeddings always use ${OPENAI.defaultModel}.`,
+      `model parameter is not supported. Document embeddings always use ${GEMINI.model.id}.`,
       ERROR_CODES.INVALID_INPUT
     );
   }
@@ -118,8 +116,7 @@ export async function handleDocEmbed(
   if (typeof input.data !== 'string' || input.data.trim().length === 0) {
     throw new ValidationError('input.data must be a non-empty base64 string', ERROR_CODES.INVALID_INPUT);
   }
-  // Reject oversized base64 strings before the expensive atob + Uint8Array allocation.
-  // ceil(MAX_DOC_BINARY_SIZE * 4/3) accounts for base64 encoding overhead (~33%).
+
   const MAX_BASE64_LEN = Math.ceil(MAX_DOC_BINARY_SIZE * 4 / 3) + 4;
   if (input.data.length > MAX_BASE64_LEN) {
     throw new ValidationError('input.data exceeds maximum encoded size', ERROR_CODES.INVALID_INPUT);
@@ -142,11 +139,49 @@ export async function handleDocEmbed(
 
   if (binaryData.length > MAX_DOC_BINARY_SIZE) {
     throw new ValidationError(
-      `Document binary size ${(binaryData.length / 1_000_000).toFixed(1)}MB exceeds maximum of ${MAX_DOC_BINARY_SIZE / 1_000_000}MB. Use max_pages to reduce scope or split the document.`,
+      `Document binary size ${(binaryData.length / 1_000_000).toFixed(1)}MB exceeds maximum of ${MAX_DOC_BINARY_SIZE / 1_000_000}MB.`,
       ERROR_CODES.INVALID_INPUT
     );
   }
 
+  // ── PDF: send directly to Gemini (native multimodal, up to 6 pages) ────────
+  if (mimeType === PDF_MIME) {
+    const effectiveMaxPages = maxPages ?? GEMINI.maxPdfPagesPerRequest;
+    if (effectiveMaxPages > GEMINI.maxPdfPagesPerRequest) {
+      throw new ValidationError(
+        `PDF embedding supports a maximum of ${GEMINI.maxPdfPagesPerRequest} pages. Use max_pages to limit scope or split the document.`,
+        ERROR_CODES.INVALID_INPUT
+      );
+    }
+
+    const embedding = await callPdfProvider(input.data as string, env.GEMINI_API_KEY, ctx.tenantId);
+    // NOTE: Gemini receives the full PDF regardless of effectiveMaxPages — the REST API does not
+    // support page-range extraction. effectiveMaxPages is validated above to cap at Gemini's
+    // 6-page native limit, but actual page truncation would require pre-processing before upload.
+    // Gemini REST does not return token counts — estimate at ~4 chars/token using binary size
+    const estimatedTokens = Math.ceil(binaryData.length / 4);
+
+    const latency_ms = Date.now() - ctx.startTime;
+    console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'pdf-native', tenant_id: ctx.tenantId, latency_ms, model: GEMINI.model.id }));
+
+    return jsonOk({
+      success: true,
+      embeddings: [{ index: 0, embedding, dimensions: embedding.length }] as EmbeddingItem[],
+      model: GEMINI.model.id,
+      document: {
+        filename,
+        mimeType,
+        type: docType.label,
+        max_pages: effectiveMaxPages,
+        chunks: 1,
+      },
+      usage: { total_tokens: estimatedTokens, estimated_cost_usd: 0 },
+      request_id: ctx.requestId,
+      latency_ms,
+    }, 200, request, env, ctx.requestId);
+  }
+
+  // ── DOCX / XLSX: convert to markdown via AI.toMarkdown, then chunk + embed ─
   const blob = new Blob([binaryData], { type: mimeType });
   let conversionResult: { name: string; format: string; data?: string; error?: string } | undefined;
 
@@ -189,28 +224,15 @@ export async function handleDocEmbed(
   const markdown = conversionResult.data.trim();
 
   if (markdown.length === 0) {
-    throw new ValidationError(
-      'Document produced no extractable text. This PDF appears to be image-only (scanned). Use /embeddings/image to embed individual page images instead.',
-      ERROR_CODES.INVALID_INPUT
-    );
-  }
-
-  if (mimeType === 'application/pdf' && markdown.length < DOC_MIN_CONTENT_CHARS) {
-    throw new ValidationError(
-      `Document produced only ${markdown.length} characters of text. This PDF may be image-only or scanned. Use /embeddings/image to embed individual page images instead.`,
-      ERROR_CODES.INVALID_INPUT
-    );
+    throw new ValidationError('Document produced no extractable text.', ERROR_CODES.INVALID_INPUT);
   }
 
   let processedMarkdown = markdown;
   let pagesDetected: number | undefined;
   let pagesProcessed: number | undefined;
 
-  // Use the same minimum advance as chunkText (DOC_CHUNK_SIZE / 4 = 2000) so the
-  // size gate and the chunker agree. The old value (ceil(8000/2) - 400 = 3600) was
-  // more conservative than necessary and could reject processable documents.
   const minAdvancePerChunk = Math.ceil(DOC_CHUNK_SIZE / 4);
-  const maxProcessableChars = DOC_MAX_CHUNKS * minAdvancePerChunk; // 50 * 2000 = 100_000
+  const maxProcessableChars = DOC_MAX_CHUNKS * minAdvancePerChunk;
 
   if (maxPages === undefined && markdown.length > maxProcessableChars) {
     throw new ValidationError(
@@ -235,21 +257,18 @@ export async function handleDocEmbed(
       ERROR_CODES.INVALID_INPUT
     );
   }
+
   const chunks = chunkText(processedMarkdown);
   if (chunks.length === 0) {
     throw new ValidationError('Document produced no embeddable chunks', ERROR_CODES.INVALID_INPUT);
   }
 
-  if (!env.OPENAI_API_KEY) {
-    throw new WorkerError('OPENAI_API_KEY not configured', ERROR_CODES.INTERNAL_ERROR, 503);
-  }
-
-  const result = await callDocProvider(chunks, env.OPENAI_API_KEY, ctx.tenantId);
-  const totalTokens = result.total_tokens;
-  const estimatedCost = parseFloat(((totalTokens / 1_000_000) * OPENAI.model.costPer1M).toFixed(6));
+  const result = await callDocProvider(chunks, env.GEMINI_API_KEY, ctx.tenantId);
+  // Gemini REST does not return token counts — estimate at ~4 chars/token
+  const estimatedTokens = Math.ceil(processedMarkdown.length / 4);
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', tenant_id: ctx.tenantId, tokens: totalTokens, latency_ms, model: OPENAI.defaultModel, chunks: chunks.length }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', tenant_id: ctx.tenantId, latency_ms, model: GEMINI.model.id, chunks: chunks.length }));
 
   return jsonOk({
     success: true,
@@ -258,7 +277,7 @@ export async function handleDocEmbed(
       embedding: item.embedding,
       dimensions: item.embedding.length,
     })),
-    model: OPENAI.defaultModel,
+    model: GEMINI.model.id,
     document: {
       filename,
       mimeType,
@@ -269,10 +288,7 @@ export async function handleDocEmbed(
       chunk_overlap: DOC_CHUNK_OVERLAP,
       ...(pagesDetected !== undefined && { pages_detected: pagesDetected, pages_processed: pagesProcessed }),
     },
-    usage: {
-      total_tokens: totalTokens,
-      estimated_cost_usd: estimatedCost,
-    },
+    usage: { total_tokens: estimatedTokens, estimated_cost_usd: 0 },
     request_id: ctx.requestId,
     latency_ms,
   }, 200, request, env, ctx.requestId);

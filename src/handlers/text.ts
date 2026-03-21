@@ -3,7 +3,8 @@
 import type { Env, RequestContext } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { callTextProvider, OPENAI } from '../providers';
+import { callTextProvider, GEMINI, GEMINI_TASK_TYPES } from '../providers';
+import type { GeminiTaskType } from '../providers';
 import { ERROR_CODES, TEXT_MAX_CHARS, MAX_REQUEST_BODY_SIZE } from '../constants';
 import { checkRateLimit } from '../utils/ratelimit';
 
@@ -12,8 +13,6 @@ const SKIP_KEYS = new Set([
   'deleted_at', 'deletedAt', 'embedding',
 ]);
 
-// Case-sensitive: intentionally matches lowercase keys only.
-// Mixed-case variants (e.g. ID, UUID) are not skipped — only exact lowercase forms are.
 function shouldSkip(key: string): boolean {
   return SKIP_KEYS.has(key) || /^_?id$|_id$|^id_|^uuid$|^guid$/.test(key);
 }
@@ -97,6 +96,27 @@ export async function handleTextEmbed(
     throw new ValidationError('Missing required field: input', ERROR_CODES.INVALID_INPUT);
   }
 
+  if (typeof body.model === 'string') {
+    throw new ValidationError(
+      `model parameter is not supported. Text embeddings always use ${GEMINI.model.id}.`,
+      ERROR_CODES.INVALID_INPUT
+    );
+  }
+
+  // task_type controls how Gemini optimizes the embedding vector.
+  // Use RETRIEVAL_DOCUMENT (default) when indexing content into a vector DB.
+  // Use RETRIEVAL_QUERY when embedding a search query against that content.
+  const taskType: GeminiTaskType = (() => {
+    if (!('task_type' in body)) return GEMINI.textTaskType as GeminiTaskType;
+    if (typeof body.task_type !== 'string' || !(GEMINI_TASK_TYPES as readonly string[]).includes(body.task_type)) {
+      throw new ValidationError(
+        `Invalid task_type. Must be one of: ${GEMINI_TASK_TYPES.join(', ')}`,
+        ERROR_CODES.INVALID_INPUT
+      );
+    }
+    return body.task_type as GeminiTaskType;
+  })();
+
   if (Array.isArray(body.input)) {
     if (body.input.length === 0) {
       throw new ValidationError('Input array must not be empty', ERROR_CODES.INVALID_INPUT);
@@ -108,50 +128,35 @@ export async function handleTextEmbed(
     body.input = parts.join(' ');
   }
 
-  const modelKey = typeof body.model === 'string' ? body.model : undefined;
-  if (modelKey) {
-    throw new ValidationError(
-      `model parameter is not supported on this endpoint. Text embeddings always use ${OPENAI.defaultModel}.`,
-      ERROR_CODES.INVALID_INPUT
-    );
-  }
-
   const text = normalizeInput(body.input);
 
   if (text.length === 0) {
     throw new ValidationError('Input cannot be empty', ERROR_CODES.INVALID_INPUT);
   }
-
   if (text.length > TEXT_MAX_CHARS) {
     throw new ValidationError(
-      `Input exceeds maximum of ${TEXT_MAX_CHARS} characters (~30,000 tokens). Truncate or summarize your input.`,
+      `Input exceeds maximum of ${TEXT_MAX_CHARS} characters. Truncate or summarize your input.`,
       ERROR_CODES.INVALID_INPUT
     );
   }
 
-  if (!env.OPENAI_API_KEY) {
-    throw new WorkerError('OPENAI_API_KEY not configured', ERROR_CODES.INTERNAL_ERROR, 503);
-  }
-
   await checkRateLimit(ctx.tenantId, 'text', env);
-  const modelConfig = OPENAI.model;
-  const result = await callTextProvider([text], env.OPENAI_API_KEY, ctx.tenantId);
+
+  const result = await callTextProvider([text], env.GEMINI_API_KEY, ctx.tenantId, taskType);
   const embedding = result.data[0].embedding;
-  const promptTokens = result.usage?.total_tokens ?? 0;
-  const estimatedCost = parseFloat(((promptTokens / 1_000_000) * modelConfig.costPer1M).toFixed(6));
+  const tokenCount = result.usage?.total_tokens ?? 0;
+  const estimatedCost = parseFloat(((tokenCount / 1_000_000) * GEMINI.model.costPer1M).toFixed(6));
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', tenant_id: ctx.tenantId, tokens: promptTokens, latency_ms, model: OPENAI.defaultModel }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', tenant_id: ctx.tenantId, latency_ms, model: GEMINI.model.id }));
 
   return jsonOk({
     success: true,
     embedding,
-    model: OPENAI.defaultModel,
+    model: GEMINI.model.id,
     dimensions: embedding.length,
-    usage: {
-      total_tokens: promptTokens,
-      estimated_cost_usd: estimatedCost,
-    },
+    task_type: taskType,
+    usage: { estimated_cost_usd: estimatedCost },
     request_id: ctx.requestId,
     latency_ms,
   }, 200, request, env, ctx.requestId);

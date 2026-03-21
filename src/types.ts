@@ -3,8 +3,7 @@
 export interface Env {
   EMBEDDING_KV: KVNamespace;
   ADMIN_KEY: string;
-  VOYAGE_API_KEY?: string;  // required only for /embeddings/image
-  OPENAI_API_KEY?: string;  // required for /embeddings/text and /embeddings/doc
+  GEMINI_API_KEY: string;   // required for all embedding endpoints (text, image, doc, pdf)
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
   AI: Ai;

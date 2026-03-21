@@ -219,16 +219,15 @@ async function testImageEmbed() {
     else fail('single URL', data);
   }
 
-  // Model override
+  // Model override — model param is not supported, expect 400
   {
     const res = await post('/embeddings/image', {
       input: { type: 'url', data: 'https://www.gstatic.com/webp/gallery/1.jpg' },
       model: 'voyage-multimodal-3',
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (res.ok && data.model === 'voyage-multimodal-3') {
-
-      pass(`model override → ${data.model}`);
+    if (res.status === 400) {
+      pass('model override → 400 (not supported)');
     }
     else fail('model override', data);
   }
