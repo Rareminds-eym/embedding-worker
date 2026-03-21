@@ -169,7 +169,18 @@ async function callWithRetry<T>(
 
     if (res.status === 429) {
       const retryAfterHeader = res.headers.get('Retry-After');
-      const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
+      const retryAfterSeconds = (() => {
+        if (!retryAfterHeader) return undefined;
+        const seconds = Number(retryAfterHeader);
+        if (Number.isFinite(seconds) && seconds > 0) return seconds;
+        // HTTP-date format (e.g. "Wed, 21 Oct 2015 07:28:00 GMT")
+        const retryAt = Date.parse(retryAfterHeader);
+        if (!Number.isNaN(retryAt)) {
+          const delta = Math.ceil((retryAt - Date.now()) / 1000);
+          return delta > 0 ? delta : undefined;
+        }
+        return undefined;
+      })();
       if (attempt < MAX_RETRIES) {
         const retryMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds! > 0
           ? retryAfterSeconds! * 1000

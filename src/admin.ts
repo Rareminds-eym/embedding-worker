@@ -108,7 +108,7 @@ async function listTenants(request: Request, env: Env): Promise<Response> {
     limit: pageSize,
     cursor: cursorParam,
   });
-  const nextCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
+  const nextCursor = page.list_complete ? undefined : page.cursor;
 
   // Batch-fetch any keys missing metadata to avoid N+1 serial KV reads.
   const withMeta = page.keys.filter(k => k.metadata?.name && k.metadata?.created_at);
@@ -167,7 +167,7 @@ async function deleteTenant(request: Request, env: Env): Promise<Response> {
         env.EMBEDDING_KV.delete(k.name),
       );
     }
-    tkCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
+    tkCursor = page.list_complete ? undefined : page.cursor;
   } while (tkCursor);
   await Promise.all(apiKeyDeletes);
 
@@ -193,7 +193,7 @@ async function deleteTenant(request: Request, env: Env): Promise<Response> {
           } catch { /* skip corrupt records */ }
         }
       }
-      legacyCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
+      legacyCursor = page.list_complete ? undefined : page.cursor;
     } while (legacyCursor);
     await Promise.all(legacyDeletes);
   }
@@ -205,7 +205,7 @@ async function deleteTenant(request: Request, env: Env): Promise<Response> {
   do {
     const page = await env.EMBEDDING_KV.list({ prefix: `rl:${id}:`, limit: 100, cursor: rlCursor });
     rlKeys.push(...page.keys.map(k => k.name));
-    rlCursor = page.list_complete ? undefined : (page as { cursor?: string }).cursor;
+    rlCursor = page.list_complete ? undefined : page.cursor;
   } while (rlCursor);
   await Promise.all(rlKeys.map(k => env.EMBEDDING_KV.delete(k)));
 

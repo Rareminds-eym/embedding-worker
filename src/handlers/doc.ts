@@ -146,18 +146,17 @@ export async function handleDocEmbed(
 
   // ── PDF: send directly to Gemini (native multimodal, up to 6 pages) ────────
   if (mimeType === PDF_MIME) {
-    const effectiveMaxPages = maxPages ?? GEMINI.maxPdfPagesPerRequest;
-    if (effectiveMaxPages > GEMINI.maxPdfPagesPerRequest) {
+    // Gemini processes the full PDF natively and caps at 6 pages internally.
+    // Page-range extraction is not possible via the REST API, so max_pages cannot
+    // be enforced here — reject it rather than advertising an unenforced limit.
+    if (maxPages !== undefined) {
       throw new ValidationError(
-        `PDF embedding supports a maximum of ${GEMINI.maxPdfPagesPerRequest} pages. Use max_pages to limit scope or split the document.`,
+        `max_pages is not supported for PDF inputs. Gemini processes the full PDF natively (up to ${GEMINI.maxPdfPagesPerRequest} pages). Split the document if you need to limit scope.`,
         ERROR_CODES.INVALID_INPUT
       );
     }
 
     const embedding = await callPdfProvider(input.data as string, env.GEMINI_API_KEY, ctx.tenantId);
-    // NOTE: Gemini receives the full PDF regardless of effectiveMaxPages — the REST API does not
-    // support page-range extraction. effectiveMaxPages is validated above to cap at Gemini's
-    // 6-page native limit, but actual page truncation would require pre-processing before upload.
     // Gemini REST does not return token counts — estimate at ~4 chars/token using binary size
     const estimatedTokens = Math.ceil(binaryData.length / 4);
 
@@ -172,7 +171,6 @@ export async function handleDocEmbed(
         filename,
         mimeType,
         type: docType.label,
-        max_pages: effectiveMaxPages,
         chunks: 1,
       },
       usage: { total_tokens: estimatedTokens, estimated_cost_usd: 0 },
@@ -191,7 +189,13 @@ export async function handleDocEmbed(
       { conversionOptions: { pdf: { metadata: false } } }
     );
     const item = Array.isArray(results) ? results[0] : results;
-    if (!item || typeof item !== 'object' || !('format' in item)) {
+    if (!item || typeof item !== 'object' || typeof (item as Record<string, unknown>).format !== 'string') {
+      throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
+    }
+    if (
+      (item as Record<string, unknown>).format !== 'error' &&
+      typeof (item as Record<string, unknown>).data !== 'string'
+    ) {
       throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
     }
     conversionResult = item as { name: string; format: string; data?: string; error?: string };
