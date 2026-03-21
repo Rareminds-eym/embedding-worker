@@ -35,7 +35,6 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
   if (lockHeld) {
     throw new WorkerError(`Tenant '${tenantId}' creation already in progress`, ERROR_CODES.TENANT_EXISTS, 409);
   }
-  await env.EMBEDDING_KV.put(lockKey, '1', { expirationTtl: 60 });
 
   const token = generateToken();
   const hash = await sha256(token);
@@ -51,6 +50,7 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
   };
 
   try {
+    await env.EMBEDDING_KV.put(lockKey, '1', { expirationTtl: 60 });
     await env.EMBEDDING_KV.put(`tenant_keys:${tenantId}:${hash}`, '1');
     await env.EMBEDDING_KV.put(`api_keys:${hash}`, JSON.stringify(keyRecord));
     await env.EMBEDDING_KV.put(`tenant:${tenantId}`, JSON.stringify(tenant), {

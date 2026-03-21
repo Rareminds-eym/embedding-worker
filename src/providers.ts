@@ -207,7 +207,15 @@ async function callWithRetry<T>(
 
     if (!res.ok) {
       const errorBody = await res.text().catch(() => '');
-      console.error(JSON.stringify({ event: 'provider.error', provider: GEMINI.name, endpoint: ctx.endpoint, status: res.status, tenant_id: ctx.tenantId, model: ctx.model, body: errorBody.slice(0, 500) }));
+      console.error(JSON.stringify({
+        event: 'provider.error',
+        provider: GEMINI.name,
+        endpoint: ctx.endpoint,
+        status: res.status,
+        tenant_id: ctx.tenantId,
+        model: ctx.model,
+        response_bytes: errorBody.length,
+      }));
       throw new ProviderError(`${ctx.endpoint} provider error (${res.status})`, res.status);
     }
 

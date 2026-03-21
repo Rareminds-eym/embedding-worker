@@ -564,19 +564,20 @@ async function testAdminRoutes() {
     await del(`/admin/tenant?id=${secondId}`);
     await post('/admin/tenant', { id: secondId, name: 'Pagination Seed' }, 'admin');
 
-    const res = await fetch(`${API_URL}/admin/tenants?limit=1`, {
-      headers: { 'X-Admin-Key': ADMIN_KEY },
-    });
-    const data = await res.json() as Record<string, unknown>;
-    const tenants = data.tenants as unknown[];
-    if (res.ok && Array.isArray(tenants) && tenants.length === 1 && typeof data.next_cursor === 'string') {
-      pass('GET /admin/tenants?limit=1 → exactly 1 result + next_cursor');
-    } else {
-      fail('GET /admin/tenants?limit=1', data);
+    try {
+      const res = await fetch(`${API_URL}/admin/tenants?limit=1`, {
+        headers: { 'X-Admin-Key': ADMIN_KEY },
+      });
+      const data = await res.json() as Record<string, unknown>;
+      const tenants = data.tenants as unknown[];
+      if (res.ok && Array.isArray(tenants) && tenants.length === 1 && typeof data.next_cursor === 'string') {
+        pass('GET /admin/tenants?limit=1 → exactly 1 result + next_cursor');
+      } else {
+        fail('GET /admin/tenants?limit=1', data);
+      }
+    } finally {
+      await del(`/admin/tenant?id=${secondId}`);
     }
-
-    // Clean up seed tenant
-    await del(`/admin/tenant?id=${secondId}`);
   }
 
   // Duplicate tenant
