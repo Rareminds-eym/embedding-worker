@@ -3,8 +3,7 @@
 export interface Env {
   EMBEDDING_KV: KVNamespace;
   ADMIN_KEY: string;
-  VOYAGE_API_KEY: string;
-  OPENAI_API_KEY: string;
+  GEMINI_API_KEY: string;   // required for all embedding endpoints (text, image, doc, pdf)
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
   AI: Ai;
@@ -22,7 +21,6 @@ export interface ApiKeyRecord {
 
 export interface RequestContext {
   tenantId: string;
-  tenant: TenantConfig;
   requestId: string;
   startTime: number;
 }

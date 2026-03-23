@@ -16,6 +16,11 @@ export default {
       ? clientId
       : generateRequestId();
 
+    if (env.EMBEDDING_KV === undefined) {
+      console.error(JSON.stringify({ event: 'startup.misconfigured', reason: 'EMBEDDING_KV binding missing', request_id: requestId }));
+      return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
+    }
+
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: getCorsHeaders(request, env) });
     }
@@ -52,7 +57,18 @@ export default {
       }
 
       if (pathname.startsWith('/embeddings/')) {
+        if (request.method === 'POST') {
+          const mediaType = request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase();
+          if (mediaType !== 'application/json') {
+            return jsonError('Content-Type must be application/json', 415, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+          }
+        }
         const ctx = await authenticate(request, env, requestId);
+
+        if (!env.GEMINI_API_KEY) {
+          console.error(JSON.stringify({ event: 'misconfigured', reason: 'GEMINI_API_KEY not set', request_id: requestId }));
+          return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
+        }
 
         if (pathname === '/embeddings/text' && request.method === 'POST') {
           return await handleTextEmbed(request, ctx, env);
