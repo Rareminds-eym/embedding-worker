@@ -189,18 +189,22 @@ export async function handleDocEmbed(
       { conversionOptions: { pdf: { metadata: false } } }
     );
     const item = Array.isArray(results) ? results[0] : results;
-    const record = item as Record<string, unknown>;
-    if (!item || typeof item !== 'object' || typeof record.name !== 'string' || typeof record.format !== 'string') {
+    if (!item || typeof item !== 'object') {
       throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
     }
-    if (record.format !== 'error' && typeof record.data !== 'string') {
+    const record = item as Record<string, unknown>;
+    const { name, format, data: itemData, error: itemError } = record;
+    if (typeof name !== 'string' || typeof format !== 'string') {
+      throw new WorkerError('Missing required fields in conversion response', ERROR_CODES.INTERNAL_ERROR, 500);
+    }
+    if (format !== 'error' && typeof itemData !== 'string') {
       throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
     }
     conversionResult = {
-      name: record.name,
-      format: record.format,
-      data: record.data as string | undefined,
-      error: record.error as string | undefined,
+      name,
+      format,
+      data: typeof itemData === 'string' ? itemData : undefined,
+      error: typeof itemError === 'string' ? itemError : undefined,
     };
   } catch (err) {
     if (err instanceof WorkerError || err instanceof ValidationError) throw err;

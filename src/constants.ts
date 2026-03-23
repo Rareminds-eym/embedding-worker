@@ -30,9 +30,17 @@ export const MAX_DOC_BATCH_CONCURRENCY = 4;
 
 export const TEXT_MAX_CHARS = 120_000;
 
-export const VOYAGE_TIMEOUT_MS = 30_000;
 export const RETRY_DELAY_MS = 1_000;
 export const MAX_RETRIES = 3;
+
+// Provider timing constants — centralised so they can be tuned without touching providers.ts
+export const PROVIDER_TOTAL_DEADLINE_MS = 60_000;
+export const PROVIDER_MIN_TIMEOUT_MS = 1_000;
+export const PROVIDER_DEFAULT_RETRY_MS = 2_000;
+
+// Gemini tokeniser approximation: ~3.5 chars per token (empirically derived).
+// Re-evaluate against actual token counts if billing accuracy becomes critical.
+export const GEMINI_CHARS_PER_TOKEN = 3.5;
 
 export const RATE_LIMIT_WINDOW_SECONDS = 60;
 export const RATE_LIMITS: Record<'text' | 'image' | 'doc', number> = {

@@ -41,9 +41,13 @@ export async function checkRateLimit(
     console.warn(JSON.stringify({ event: 'rate_limit.approaching_threshold', tenant_id: tenantId, endpoint, count, limit }));
   }
 
-  // KV write failure is non-fatal — rate limit check already passed, don't block the request
+  // KV write failure is non-fatal — rate limit check already passed, don't block the request.
+  // Cap at limit + 10 to prevent unbounded counter growth under concurrent write races
+  // (KV non-atomic read-modify-write means concurrent requests can each increment by 1,
+  // so the effective count may slightly exceed `limit` — this is an accepted trade-off).
   try {
-    await env.EMBEDDING_KV.put(key, String(count + 1), { expirationTtl: RATE_LIMIT_WINDOW_SECONDS * 2 });
+    const safeCount = Math.min(count + 1, limit + 10);
+    await env.EMBEDDING_KV.put(key, String(safeCount), { expirationTtl: RATE_LIMIT_WINDOW_SECONDS * 2 });
   } catch (err) {
     console.error(JSON.stringify({ event: 'rate_limit.kv_write_failed', tenant_id: tenantId, endpoint, error: err instanceof Error ? err.message : String(err) }));
   }

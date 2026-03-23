@@ -32,10 +32,12 @@ function extractText(value: unknown, key?: string, depth = 0, budget = { left: T
 
   if (typeof value === 'object' && value !== null) {
     if (seen.has(value)) return '';
-    seen.add(value);
+    // Truncate large arrays before registering in the seen-set to avoid
+    // holding a reference to the full array for the lifetime of the traversal.
     if (Array.isArray(value) && value.length > 1000) {
       value = value.slice(0, 1000) as unknown[];
     }
+    seen.add(value as object);
   }
 
   if (typeof value === 'string') {

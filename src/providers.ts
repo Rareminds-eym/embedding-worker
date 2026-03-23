@@ -1,7 +1,16 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { ProviderError, RateLimitError } from './types';
-import { RETRY_DELAY_MS, MAX_RETRIES, DOC_BATCH_SIZE, MAX_DOC_BATCH_CONCURRENCY } from './constants';
+import {
+  RETRY_DELAY_MS,
+  MAX_RETRIES,
+  DOC_BATCH_SIZE,
+  MAX_DOC_BATCH_CONCURRENCY,
+  PROVIDER_TOTAL_DEADLINE_MS,
+  PROVIDER_MIN_TIMEOUT_MS,
+  PROVIDER_DEFAULT_RETRY_MS,
+  GEMINI_CHARS_PER_TOKEN,
+} from './constants';
 
 // ============================================================================
 // PROVIDER CONFIGURATION — change only this file to swap providers
@@ -144,8 +153,7 @@ async function callWithRetry<T>(
   validate: (json: unknown) => T,
   ctx: RetryContext,
 ): Promise<T> {
-  const TOTAL_DEADLINE_MS = 60_000; // Allow for retries with 30s per-request timeout
-  const deadline = Date.now() + TOTAL_DEADLINE_MS;
+  const deadline = Date.now() + PROVIDER_TOTAL_DEADLINE_MS;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const remainingMs = deadline - Date.now();
@@ -153,8 +161,7 @@ async function callWithRetry<T>(
 
     let res: Response;
     try {
-      const MIN_REQUEST_TIMEOUT_MS = 1_000;
-      const requestTimeoutMs = Math.max(MIN_REQUEST_TIMEOUT_MS, Math.min(GEMINI.timeoutMs, remainingMs));
+      const requestTimeoutMs = Math.max(PROVIDER_MIN_TIMEOUT_MS, Math.min(GEMINI.timeoutMs, remainingMs));
       res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -164,7 +171,16 @@ async function callWithRetry<T>(
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(requestTimeoutMs),
       });
-    } catch {
+    } catch (err) {
+      console.error(JSON.stringify({
+        event: 'provider.request_failed',
+        provider: GEMINI.name,
+        endpoint: ctx.endpoint,
+        tenant_id: ctx.tenantId,
+        model: ctx.model,
+        attempt: attempt + 1,
+        error: err instanceof Error ? err.message : String(err),
+      }));
       if (attempt < MAX_RETRIES) {
         const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
         const wouldExceedDeadline = Date.now() + delay > deadline;
@@ -172,7 +188,10 @@ async function callWithRetry<T>(
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
-      throw new ProviderError(`${ctx.endpoint} provider unreachable`, 502);
+      throw new ProviderError(
+        `${ctx.endpoint} provider unreachable: ${err instanceof Error ? err.message : String(err)}`,
+        502,
+      );
     }
 
     if (res.status === 429) {
@@ -192,7 +211,7 @@ async function callWithRetry<T>(
       if (attempt < MAX_RETRIES) {
         const retryMs = retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
           ? retryAfterSeconds * 1000
-          : 2_000;
+          : PROVIDER_DEFAULT_RETRY_MS;
         if (Date.now() + retryMs > deadline) {
           throw new RateLimitError('Rate limit exceeded. Please wait before retrying.', retryAfterSeconds);
         }
@@ -327,7 +346,7 @@ export async function callTextProvider(
   taskType: string = GEMINI.textTaskType,
 ): Promise<TextProviderResponse> {
   const embeddings = await callBatchEmbedContents(inputs, apiKey, tenantId, taskType);
-  const estimatedTokens = inputs.reduce((sum, text) => sum + Math.max(1, Math.ceil(text.length / 3.5)), 0);
+  const estimatedTokens = inputs.reduce((sum, text) => sum + Math.max(1, Math.ceil(text.length / GEMINI_CHARS_PER_TOKEN)), 0);
   return {
     data: embeddings.map(embedding => ({ embedding })),
     usage: { total_tokens: estimatedTokens },
@@ -394,7 +413,7 @@ export async function callDocProvider(
   tenantId: string,
 ): Promise<DocProviderResponse> {
   const result: DocProviderResponse = {
-    embeddings: [],
+    embeddings: new Array(chunks.length) as { index: number; embedding: number[] }[],
     total_tokens: 0,
     _model: GEMINI.model.id,
     _provider: GEMINI.name,
@@ -403,24 +422,17 @@ export async function callDocProvider(
   const batchStarts: number[] = [];
   for (let i = 0; i < chunks.length; i += DOC_BATCH_SIZE) batchStarts.push(i);
 
-  const batchResults: { i: number; embeddings: number[][] }[] = [];
-
-  const batchPromises = batchStarts.map(async (i) => {
-    const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-    const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI.textTaskType);
-    return { i, embeddings };
-  });
-
-  for (let offset = 0; offset < batchPromises.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
-    const window = batchPromises.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY);
-    batchResults.push(...await Promise.all(window));
-  }
-
-  batchResults.sort((a, b) => a.i - b.i);
-  for (const { i, embeddings } of batchResults) {
-    embeddings.forEach((embedding, j) => {
-      result.embeddings.push({ index: i + j, embedding });
-    });
+  // Process in concurrency-limited windows; write directly into pre-allocated slots
+  // to avoid a second pass and eliminate the sort-then-flatten allocation.
+  for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
+    const window = batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY);
+    await Promise.all(window.map(async (i) => {
+      const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
+      const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI.textTaskType);
+      embeddings.forEach((embedding, j) => {
+        result.embeddings[i + j] = { index: i + j, embedding };
+      });
+    }));
   }
 
   return result;
