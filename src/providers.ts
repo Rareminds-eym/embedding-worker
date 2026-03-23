@@ -54,6 +54,8 @@ export const GEMINI_TASK_TYPES = [
 
 export type GeminiTaskType = typeof GEMINI_TASK_TYPES[number];
 
+const GEMINI_AUTH_HEADER = 'x-goog-api-key' as const;
+
 export const GEMINI: GeminiConfig = {
   name: 'gemini',
   baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
@@ -72,7 +74,7 @@ export const GEMINI: GeminiConfig = {
   maxImagesPerRequest: 6,
   maxPdfPagesPerRequest: 6,
   timeoutMs: 30_000,
-  authHeader: 'x-goog-api-key',
+  authHeader: GEMINI_AUTH_HEADER,
 };
 
 // ============================================================================
@@ -158,7 +160,7 @@ async function callWithRetry<T>(
           [GEMINI.authHeader]: apiKey,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(Math.min(GEMINI.timeoutMs, remainingMs)),
+        signal: AbortSignal.timeout(Math.max(1_000, Math.min(GEMINI.timeoutMs, remainingMs))),
       });
     } catch {
       if (attempt < MAX_RETRIES) {
@@ -228,7 +230,9 @@ async function callWithRetry<T>(
       return validate(json);
     } catch (err) {
       if (err instanceof ProviderError || err instanceof RateLimitError) throw err;
-      if (err instanceof SyntaxError) throw new ProviderError(`${ctx.endpoint} provider returned invalid JSON`, 502);
+      if (err instanceof SyntaxError || (err && typeof err === 'object' && 'name' in err && err.name === 'SyntaxError')) {
+        throw new ProviderError(`${ctx.endpoint} provider returned invalid JSON`, 502);
+      }
       console.error(JSON.stringify({ event: 'provider.invalid_response', provider: GEMINI.name, endpoint: ctx.endpoint, tenant_id: ctx.tenantId, model: ctx.model, error: err instanceof Error ? err.message : String(err) }));
       throw new ProviderError(`${ctx.endpoint} provider returned an invalid response`, 502);
     }
@@ -319,7 +323,7 @@ export async function callTextProvider(
   taskType: string = GEMINI.textTaskType,
 ): Promise<TextProviderResponse> {
   const embeddings = await callBatchEmbedContents(inputs, apiKey, tenantId, taskType);
-  const estimatedTokens = inputs.reduce((sum, text) => sum + Math.ceil(text.length / 3.5), 0);
+  const estimatedTokens = inputs.reduce((sum, text) => sum + Math.max(1, Math.ceil(text.length / 3.5)), 0);
   return {
     data: embeddings.map(embedding => ({ embedding })),
     usage: { total_tokens: estimatedTokens },
@@ -397,15 +401,15 @@ export async function callDocProvider(
 
   const batchResults: { i: number; embeddings: number[][] }[] = [];
 
-  for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
-    const window = batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY);
-    batchResults.push(...await Promise.all(
-      window.map(async (i) => {
-        const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-        const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI.textTaskType);
-        return { i, embeddings };
-      }),
-    ));
+  const batchPromises = batchStarts.map(async (i) => {
+    const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
+    const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI.textTaskType);
+    return { i, embeddings };
+  });
+
+  for (let offset = 0; offset < batchPromises.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
+    const window = batchPromises.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY);
+    batchResults.push(...await Promise.all(window));
   }
 
   batchResults.sort((a, b) => a.i - b.i);

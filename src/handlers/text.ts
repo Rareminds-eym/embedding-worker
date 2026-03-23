@@ -13,8 +13,11 @@ const SKIP_KEYS = new Set([
   'deleted_at', 'deletedAt', 'embedding',
 ]);
 
+const ID_PATTERN = /^(_?id|.*_id|id_.*|uuid|guid)$/i;
+
 function shouldSkip(key: string): boolean {
-  return SKIP_KEYS.has(key) || /^_?id$|_id$|^id_|^uuid$|^guid$/.test(key);
+  if (key.length > 50) return true;
+  return SKIP_KEYS.has(key) || ID_PATTERN.test(key);
 }
 
 function tryParseJsonString(v: string): unknown | null {
@@ -25,7 +28,7 @@ function tryParseJsonString(v: string): unknown | null {
 
 function extractText(value: unknown, key?: string, depth = 0, budget = { left: TEXT_MAX_CHARS }, seen = new WeakSet()): string {
   if (budget.left <= 0 || value === null || value === undefined) return '';
-  if (depth > 10) return '';
+  if (depth > 20) return '';
 
   if (typeof value === 'object' && value !== null) {
     if (seen.has(value)) return '';

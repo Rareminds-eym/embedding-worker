@@ -8,6 +8,14 @@ export function generateRequestId(): string {
   return crypto.randomUUID();
 }
 
+function getSecurityHeaders(): Record<string, string> {
+  return {
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'X-XSS-Protection': '1; mode=block',
+  };
+}
+
 export function getCorsHeaders(request: Request, env?: Env): Record<string, string> {
   const origin = request.headers.get('Origin') ?? '';
   const allowedOrigins = env?.ALLOWED_ORIGINS
@@ -33,8 +41,7 @@ export function getCorsHeaders(request: Request, env?: Env): Record<string, stri
 export function jsonOk(data: unknown, status = 200, request?: Request, env?: Env, requestId?: string): Response {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
+    ...getSecurityHeaders(),
   };
   if (request) Object.assign(headers, getCorsHeaders(request, env));
   if (requestId) headers['X-Request-ID'] = requestId;
@@ -50,7 +57,7 @@ export function jsonError(
   extra?: Record<string, unknown>,
   env?: Env
 ): Response {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Request-ID': requestId };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Request-ID': requestId, ...getSecurityHeaders() };
   if (request) Object.assign(headers, getCorsHeaders(request, env));
   return new Response(
     JSON.stringify({ success: false, errorCode: code, message, request_id: requestId, ...extra }),
@@ -59,7 +66,7 @@ export function jsonError(
 }
 
 export function handleError(err: unknown, requestId: string, request?: Request, env?: Env): Response {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Request-ID': requestId };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Request-ID': requestId, ...getSecurityHeaders() };
   if (request) Object.assign(headers, getCorsHeaders(request, env));
 
   if (err instanceof AuthError) {

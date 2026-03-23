@@ -54,9 +54,10 @@ export async function authenticateAdmin(request: Request, env: Env): Promise<voi
   const key = request.headers.get('X-Admin-Key') ?? '';
   const expected = env.ADMIN_KEY ?? '';
   const enc = new TextEncoder();
+  const normalizeKey = (k: string) => k.padEnd(64, '\0').slice(0, 64);
   const [hashA, hashB] = await Promise.all([
-    crypto.subtle.digest('SHA-256', enc.encode(key)),
-    crypto.subtle.digest('SHA-256', enc.encode(expected)),
+    crypto.subtle.digest('SHA-256', enc.encode(normalizeKey(key))),
+    crypto.subtle.digest('SHA-256', enc.encode(normalizeKey(expected))),
   ]);
   if (key.length === 0 || expected.length === 0 || !crypto.subtle.timingSafeEqual(hashA, hashB)) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');

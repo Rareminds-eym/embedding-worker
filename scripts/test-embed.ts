@@ -218,10 +218,10 @@ async function testTextEmbed() {
   }
 }
 
-// Test images: two real photos via URL, one base64 PNG
+// Test images: stable public URLs + base64 fallback
 const TEST_IMAGES = {
-  url1: 'https://i.ibb.co/nQNGqL0/beach1.jpg',
-  url2: 'https://i.ibb.co/r5w8hG8/beach2.jpg',
+  url1: 'https://httpbin.org/image/jpeg',
+  url2: 'https://httpbin.org/image/png',
   png: 'iVBORw0KGgoAAAANSUhEUgAAABwAAAA4CAIAAABhUg/jAAAAMklEQVR4nO3MQREAMAgAoLkoFreTiSzhy4MARGe9bX99lEqlUqlUKpVKpVKpVCqVHksHaBwCA2cPf0cAAAAASUVORK5CYII=',
 };
 
