@@ -383,7 +383,7 @@ PDF response:
   "success": true,
   "embeddings": [{ "index": 0, "embedding": [...], "dimensions": 3072 }],
   "model": "gemini-embedding-2-preview",
-  "document": { "filename": "resume.pdf", "mimeType": "application/pdf", "type": "PDF", "max_pages": 6, "chunks": 1 },
+  "document": { "filename": "resume.pdf", "mimeType": "application/pdf", "type": "PDF", "chunks": 1 },
   "usage": { "total_tokens": 4608, "estimated_cost_usd": 0 },
   "request_id": "a1b2c3d4-...",
   "latency_ms": 1200

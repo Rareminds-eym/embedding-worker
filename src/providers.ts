@@ -137,6 +137,24 @@ interface GeminiBatchResponse {
 }
 
 // ============================================================================
+// Runtime response validators — avoid unsafe `as` casts on external API data
+// ============================================================================
+
+function isGeminiEmbedResponse(json: unknown): json is GeminiEmbedResponse {
+  if (!json || typeof json !== 'object') return false;
+  const j = json as Record<string, unknown>;
+  if (!j.embedding || typeof j.embedding !== 'object') return false;
+  const emb = j.embedding as Record<string, unknown>;
+  return Array.isArray(emb.values) && emb.values.length > 0;
+}
+
+function isGeminiBatchResponse(json: unknown, expectedCount: number): json is GeminiBatchResponse {
+  if (!json || typeof json !== 'object') return false;
+  const j = json as Record<string, unknown>;
+  return Array.isArray(j.embeddings) && j.embeddings.length === expectedCount;
+}
+
+// ============================================================================
 // Retry-aware fetch
 // ============================================================================
 
@@ -157,7 +175,15 @@ async function callWithRetry<T>(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) throw new ProviderError(`${ctx.endpoint} provider unreachable`, 502);
+    if (remainingMs <= 0) {
+      throw new ProviderError(`${ctx.endpoint} provider timeout (deadline exceeded)`, 502);
+    }
+    if (remainingMs < PROVIDER_MIN_TIMEOUT_MS) {
+      throw new ProviderError(
+        `${ctx.endpoint} provider timeout (insufficient time remaining: ${remainingMs}ms)`,
+        502,
+      );
+    }
 
     let res: Response;
     try {
@@ -242,6 +268,7 @@ async function callWithRetry<T>(
         tenant_id: ctx.tenantId,
         model: ctx.model,
         response_bytes: errorBody.length,
+        response_preview: errorBody.slice(0, 200),
       }));
       throw new ProviderError(`${ctx.endpoint} provider error (${res.status})`, res.status);
     }
@@ -285,11 +312,10 @@ async function callEmbedContent(
     apiKey,
     body,
     (json) => {
-      const j = json as GeminiEmbedResponse;
-      if (!j?.embedding?.values || !Array.isArray(j.embedding.values) || j.embedding.values.length === 0) {
+      if (!isGeminiEmbedResponse(json)) {
         throw new ProviderError(`Invalid response from ${GEMINI.name} ${endpointLabel}`, 502);
       }
-      return j.embedding.values;
+      return json.embedding.values;
     },
     { endpoint: endpointLabel, tenantId, model: GEMINI.model.id },
   );
@@ -319,11 +345,10 @@ async function callBatchEmbedContents(
     apiKey,
     body,
     (json) => {
-      const j = json as GeminiBatchResponse;
-      if (!j?.embeddings || !Array.isArray(j.embeddings) || j.embeddings.length !== texts.length) {
+      if (!isGeminiBatchResponse(json, texts.length)) {
         throw new ProviderError(`Invalid batch response from ${GEMINI.name}`, 502);
       }
-      return j.embeddings.map((e, i) => {
+      return json.embeddings.map((e, i) => {
         if (!e?.values || !Array.isArray(e.values) || e.values.length === 0) {
           throw new ProviderError(`Missing embedding at index ${i} from ${GEMINI.name}`, 502);
         }
@@ -379,12 +404,33 @@ export async function callImageBatchProvider(
   const results: { embedding: number[]; index: number }[] = [];
   for (let offset = 0; offset < itemParts.length; offset += GEMINI.maxImagesPerRequest) {
     const window = itemParts.slice(offset, offset + GEMINI.maxImagesPerRequest);
-    const windowResults = await Promise.all(
+    const settled = await Promise.allSettled(
       window.map((parts, i) =>
         callEmbedContent(parts, apiKey, tenantId, 'image').then(embedding => ({ embedding, index: offset + i }))
       )
     );
-    results.push(...windowResults);
+    const failed: number[] = [];
+    for (const result of settled) {
+      if (result.status === 'fulfilled') {
+        results.push(result.value);
+      } else {
+        // Collect which absolute indexes failed for a meaningful error message
+        const idx = offset + settled.indexOf(result);
+        failed.push(idx);
+        console.error(JSON.stringify({
+          event: 'image_batch.item_failed',
+          tenant_id: tenantId,
+          index: idx,
+          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+        }));
+      }
+    }
+    if (failed.length > 0) {
+      throw new ProviderError(
+        `Image embedding failed for ${failed.length} of ${window.length} items in batch (indexes: ${failed.join(', ')})`,
+        502,
+      );
+    }
   }
   return {
     data: results,
@@ -412,8 +458,10 @@ export async function callDocProvider(
   apiKey: string,
   tenantId: string,
 ): Promise<DocProviderResponse> {
+  // Pre-allocate with sentinel values so TypeScript and runtime both see a dense array.
+  // Slots are overwritten by each batch; any unfilled slot indicates a logic error.
   const result: DocProviderResponse = {
-    embeddings: new Array(chunks.length) as { index: number; embedding: number[] }[],
+    embeddings: Array.from({ length: chunks.length }, (_, i) => ({ index: i, embedding: [] as number[] })),
     total_tokens: 0,
     _model: GEMINI.model.id,
     _provider: GEMINI.name,
@@ -422,13 +470,24 @@ export async function callDocProvider(
   const batchStarts: number[] = [];
   for (let i = 0; i < chunks.length; i += DOC_BATCH_SIZE) batchStarts.push(i);
 
-  // Process in concurrency-limited windows; write directly into pre-allocated slots
-  // to avoid a second pass and eliminate the sort-then-flatten allocation.
+  // Process in concurrency-limited windows; write directly into pre-allocated slots.
   for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
     const window = batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY);
     await Promise.all(window.map(async (i) => {
       const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-      const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI.textTaskType);
+      let embeddings: number[][];
+      try {
+        embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI.textTaskType);
+      } catch (err) {
+        console.error(JSON.stringify({
+          event: 'doc_batch.failed',
+          tenant_id: tenantId,
+          batch_start: i,
+          batch_size: batch.length,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        throw err;
+      }
       embeddings.forEach((embedding, j) => {
         result.embeddings[i + j] = { index: i + j, embedding };
       });

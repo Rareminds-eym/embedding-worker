@@ -22,6 +22,60 @@ const TENANT_NAME = 'Test Tenant';
 
 let API_KEY = process.env.API_KEY || '';
 
+// ─── shared response types ────────────────────────────────────────────────────
+
+interface EmbeddingResult {
+  index: number;
+  embedding: number[];
+  dimensions: number;
+}
+
+interface UsageData {
+  total_tokens?: number;
+  estimated_cost_usd?: number;
+}
+
+interface DocumentMetadata {
+  filename?: string;
+  mimeType?: string;
+  type?: string;
+  chunks?: number;
+  total_chars?: number;
+  max_pages?: number;
+  pages_detected?: number;
+  pages_processed?: number;
+}
+
+interface ApiResponse {
+  success?: boolean;
+  model?: string;
+  embedding?: number[];
+  embeddings?: EmbeddingResult[];
+  document?: DocumentMetadata;
+  usage?: UsageData;
+  request_id?: string;
+  latency_ms?: number;
+  task_type?: string;
+  dimensions?: number;
+  errorCode?: string;
+  message?: string;
+  api_key?: string;
+  status?: string;
+  version?: string;
+  timestamp?: string;
+  tenant_id?: string;
+  tenants?: unknown[];
+  count?: number;
+  next_cursor?: string;
+}
+
+// ─── test constants ───────────────────────────────────────────────────────────
+
+const EXPECTED_GEMINI_DIMENSIONS = 3072;
+const EXPECTED_GEMINI_MODEL = 'gemini-embedding-2-preview';
+const FETCH_TIMEOUT_MS = 10_000;
+const BASE64_TO_BYTES_RATIO = 0.75;
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function pass(label: string) { console.log(`  ✅ ${label}`); }
@@ -49,10 +103,10 @@ async function del(path: string) {
 async function testHealth() {
   console.log('\n[health]');
   const res = await fetch(`${API_URL}/health`);
-  const data = await res.json() as Record<string, unknown>;
+  const data = await res.json() as ApiResponse;
   if (!res.ok || data.status !== 'ok') { fail('GET /health', data); return; }
   if (typeof data.version !== 'string') fail('health → version missing');
-  else if (typeof data.timestamp !== 'string' || isNaN(Date.parse(data.timestamp as string))) fail('health → timestamp invalid');
+  else if (typeof data.timestamp !== 'string' || isNaN(Date.parse(data.timestamp))) fail('health → timestamp invalid');
   else pass(`GET /health → ok (version=${data.version})`);
 }
 
@@ -63,10 +117,10 @@ async function setupTenant(): Promise<boolean> {
   await del(`/admin/tenant?id=${TENANT_ID}`);
 
   const res = await post('/admin/tenant', { id: TENANT_ID, name: TENANT_NAME }, 'admin');
-  const data = await res.json() as Record<string, unknown>;
+  const data = await res.json() as ApiResponse;
 
   if (res.status === 201 && typeof data.api_key === 'string') {
-    API_KEY = data.api_key as string;
+    API_KEY = data.api_key;
     pass(`Created tenant '${TENANT_ID}', got API key`);
     return true;
   }
@@ -80,19 +134,19 @@ async function testTextEmbed() {
   // Plain string — full success shape
   {
     const res = await post('/embeddings/text', { input: 'Software engineer with 5 years of React experience' }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (!res.ok || !Array.isArray(data.embedding)) {
       fail('plain string', data);
       return;
     }
-    const emb = data.embedding as number[];
+    const emb = data.embedding;
     if (data.success !== true) fail('plain string → success should be true');
-    else if (data.model !== 'gemini-embedding-2-preview') fail(`plain string → unexpected model: ${data.model}`);
+    else if (data.model !== EXPECTED_GEMINI_MODEL) fail(`plain string → unexpected model: ${data.model}`);
     else if (typeof data.dimensions !== 'number' || emb.length !== data.dimensions) fail(`plain string → dimensions mismatch: declared=${data.dimensions} actual=${emb.length}`);
     else if (data.task_type !== 'RETRIEVAL_DOCUMENT') fail(`plain string → default task_type should be RETRIEVAL_DOCUMENT, got ${data.task_type}`);
     else if (!emb.every(v => typeof v === 'number' && isFinite(v))) fail('plain string → embedding contains non-finite values');
     else if (emb.every(v => v === 0)) fail('plain string → embedding is all zeros');
-    else if (typeof (data.usage as Record<string, unknown>)?.estimated_cost_usd !== 'number') fail('plain string → estimated_cost_usd missing');
+    else if (typeof data.usage?.estimated_cost_usd !== 'number') fail('plain string → estimated_cost_usd missing');
     else if (typeof data.request_id !== 'string') fail('plain string → request_id missing');
     else if (typeof data.latency_ms !== 'number' || data.latency_ms < 0) fail('plain string → latency_ms invalid');
     else pass(`plain string → embedding (model=${data.model}, dims=${data.dimensions}, task_type=${data.task_type})`);
@@ -103,7 +157,7 @@ async function testTextEmbed() {
     const res = await post('/embeddings/text', {
       input: { name: 'Jane Smith', title: 'Senior Backend Engineer', skills: ['Rust', 'Go', 'PostgreSQL'] },
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.ok && Array.isArray(data.embedding)) pass(`object input → embedding (model=${data.model})`);
     else fail('object input', data);
   }
@@ -113,7 +167,7 @@ async function testTextEmbed() {
     const res = await post('/embeddings/text', {
       input: ['machine learning', 'natural language processing', 'vector databases'],
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.ok && Array.isArray(data.embedding)) pass(`string array → single embedding (model=${data.model})`);
     else fail('string array', data);
   }
@@ -123,7 +177,7 @@ async function testTextEmbed() {
     const res = await post('/embeddings/text', {
       input: ['Python developer', { skill: 'FastAPI', years: 3 }, 'REST API design'],
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.ok && Array.isArray(data.embedding)) pass(`mixed array → single embedding (model=${data.model})`);
     else fail('mixed array', data);
   }
@@ -133,7 +187,7 @@ async function testTextEmbed() {
     const res = await post('/embeddings/text', {
       input: '{"role":"engineer","department":"platform","level":"senior"}',
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.ok && Array.isArray(data.embedding)) pass(`stringified JSON → embedding (model=${data.model})`);
     else fail('stringified JSON', data);
   }
@@ -141,7 +195,7 @@ async function testTextEmbed() {
   // task_type: RETRIEVAL_QUERY — echoed back in response
   {
     const res = await post('/embeddings/text', { input: 'find engineers with Go experience', task_type: 'RETRIEVAL_QUERY' }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.ok && data.task_type === 'RETRIEVAL_QUERY' && Array.isArray(data.embedding))
       pass(`task_type=RETRIEVAL_QUERY → echoed back`);
     else fail('task_type=RETRIEVAL_QUERY', data);
@@ -150,14 +204,15 @@ async function testTextEmbed() {
   // task_type: invalid value → 400
   {
     const res = await post('/embeddings/text', { input: 'test', task_type: 'INVALID_TYPE' }, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('invalid task_type → 400');
-    else fail('invalid task_type should be 400', await res.json());
+    else fail('invalid task_type should be 400', errData);
   }
 
   // model param rejected — text always uses Gemini, no override
   {
     const res = await post('/embeddings/text', { input: 'hello world', model: 'voyage-4-lite' }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.status === 400) pass('model param → 400 (not supported)');
     else fail('model param should be 400', data);
   }
@@ -174,7 +229,7 @@ async function testTextEmbed() {
       },
       body: JSON.stringify({ input: 'test' }),
     });
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.ok && data.request_id === customRequestId && res.headers.get('X-Request-ID') === customRequestId)
       pass('X-Request-ID passthrough → echoed back');
     else fail('X-Request-ID passthrough', data);
@@ -187,26 +242,29 @@ async function testTextEmbed() {
       headers: { 'Authorization': `Bearer ${API_KEY}`, 'Content-Type': 'text/plain' },
       body: JSON.stringify({ input: 'test' }),
     });
+    const errData = res.status !== 415 ? await res.json() : null;
     if (res.status === 415) pass('wrong Content-Type → 415');
-    else fail('wrong Content-Type should be 415', await res.json());
+    else fail('wrong Content-Type should be 415', errData);
   }
 
   // Validation errors
   {
     const res = await post('/embeddings/text', { input: 'hello', model: 'gpt-4' }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.status === 400 && data.errorCode === 'INVALID_INPUT') pass('invalid model → 400');
     else fail('invalid model', data);
   }
   {
     const res = await post('/embeddings/text', { input: '' }, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('empty input → 400');
-    else fail('empty input should be 400', await res.json());
+    else fail('empty input should be 400', errData);
   }
   {
     const res = await post('/embeddings/text', {}, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('missing input → 400');
-    else fail('missing input should be 400', await res.json());
+    else fail('missing input should be 400', errData);
   }
   {
     const res = await fetch(`${API_URL}/embeddings/text`, {
@@ -214,8 +272,9 @@ async function testTextEmbed() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ input: 'test' }),
     });
+    const errData = res.status !== 401 ? await res.json() : null;
     if (res.status === 401) pass('no auth → 401');
-    else fail('no auth should be 401', await res.json());
+    else fail('no auth should be 401', errData);
   }
 }
 
@@ -228,7 +287,7 @@ interface FetchedImage { data: string; mediaType: 'image/jpeg' | 'image/png' }
 
 async function fetchImageBase64(url: string, mediaType: 'image/jpeg' | 'image/png'): Promise<FetchedImage | null> {
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) return null;
     const buf = await res.arrayBuffer();
     return { data: Buffer.from(buf).toString('base64'), mediaType };
@@ -240,41 +299,38 @@ async function fetchImageBase64(url: string, mediaType: 'image/jpeg' | 'image/pn
 async function testImageEmbed() {
   console.log('\n[image]');
 
-  // Fetch real images — Gemini rejects degenerate/trivial pixel stubs
+  // Fetch real images — Gemini rejects degenerate/trivial pixel stubs.
+  // Use Promise.allSettled so a single network failure doesn't throw.
   process.stdout.write('  Fetching sample images...');
-  const [jpeg, png] = await Promise.all([
-    // Small but real JPEG — Wikimedia public domain test image (~2KB)
-    fetchImageBase64('https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png', 'image/png'),
-    // Small PNG from the same source
+  const fetchResults = await Promise.allSettled([
     fetchImageBase64('https://www.gstatic.com/webp/gallery/1.jpg', 'image/jpeg'),
+    fetchImageBase64('https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png', 'image/png'),
   ]);
+  const sampleJpeg = fetchResults[0].status === 'fulfilled' ? fetchResults[0].value : null;
+  const samplePng  = fetchResults[1].status === 'fulfilled' ? fetchResults[1].value : null;
 
-  if (!jpeg && !png) {
+  if (!sampleJpeg && !samplePng) {
     console.log(' skipped (could not fetch sample images — check network)');
-    // Still run all validation-only tests below
   } else {
     console.log(` ok`);
   }
-
-  const sampleJpeg = png;   // gstatic JPEG used as our JPEG fixture
-  const samplePng  = jpeg;  // Wikimedia PNG used as our PNG fixture
 
   // Single base64 image — full success shape (requires network)
   if (sampleJpeg) {
     const res = await post('/embeddings/image', {
       input: { type: 'base64', data: sampleJpeg.data, mediaType: sampleJpeg.mediaType },
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (!res.ok || !Array.isArray(data.embedding)) {
       fail('single image', data);
     } else {
-      const emb = data.embedding as number[];
+      const emb = data.embedding;
       if (data.success !== true) fail('single image → success should be true');
-      else if (data.model !== 'gemini-embedding-2-preview') fail(`single image → unexpected model: ${data.model}`);
+      else if (data.model !== EXPECTED_GEMINI_MODEL) fail(`single image → unexpected model: ${data.model}`);
       else if (typeof data.dimensions !== 'number' || emb.length !== data.dimensions) fail(`single image → dimensions mismatch: declared=${data.dimensions} actual=${emb.length}`);
       else if (!emb.every(v => typeof v === 'number' && isFinite(v))) fail('single image → embedding contains non-finite values');
       else if (emb.every(v => v === 0)) fail('single image → embedding is all zeros');
-      else if (typeof (data.usage as Record<string, unknown>)?.estimated_cost_usd !== 'number') fail('single image → estimated_cost_usd missing');
+      else if (typeof data.usage?.estimated_cost_usd !== 'number') fail('single image → estimated_cost_usd missing');
       else if (typeof data.request_id !== 'string') fail('single image → request_id missing');
       else if (typeof data.latency_ms !== 'number' || data.latency_ms < 0) fail('single image → latency_ms invalid');
       else if ('embeddings' in data) fail('single image → should return flat embedding, not embeddings array');
@@ -292,11 +348,11 @@ async function testImageEmbed() {
         { type: 'base64', data: samplePng.data, mediaType: samplePng.mediaType },
       ],
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (!res.ok || !Array.isArray(data.embeddings)) {
       fail('batch 2 images', data);
     } else {
-      const embeddings = data.embeddings as { index: number; embedding: number[]; dimensions: number }[];
+      const embeddings = data.embeddings;
       const indexes = embeddings.map(e => e.index).sort((a, b) => a - b);
       const contiguous = indexes.every((idx, i) => idx === i);
       const dims = embeddings.map(e => e.embedding.length);
@@ -317,8 +373,9 @@ async function testImageEmbed() {
       input: { type: 'base64', data: 'aW52YWxpZA==', mediaType: 'image/jpeg' },
       model: 'voyage-multimodal-3',
     }, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('model override → 400 (not supported)');
-    else fail('model override', await res.json());
+    else fail('model override', errData);
   }
 
   // Invalid URL scheme
@@ -326,8 +383,9 @@ async function testImageEmbed() {
     const res = await post('/embeddings/image', {
       input: { type: 'url', data: 'ftp://example.com/image.jpg' },
     }, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('ftp URL → 400');
-    else fail('ftp URL should be 400', await res.json());
+    else fail('ftp URL should be 400', errData);
   }
 
   // Private IP
@@ -335,8 +393,9 @@ async function testImageEmbed() {
     const res = await post('/embeddings/image', {
       input: { type: 'url', data: 'http://192.168.1.1/image.jpg' },
     }, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('private IP URL → 400');
-    else fail('private IP should be 400', await res.json());
+    else fail('private IP should be 400', errData);
   }
 
   // Unsupported mediaType on base64 (gif is not supported by Gemini embedding)
@@ -344,8 +403,9 @@ async function testImageEmbed() {
     const res = await post('/embeddings/image', {
       input: { type: 'base64', data: 'abc123', mediaType: 'image/gif' },
     }, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('base64 unsupported mediaType (gif) → 400');
-    else fail('base64 gif should be 400', await res.json());
+    else fail('base64 gif should be 400', errData);
   }
 
   // Missing mediaType on base64
@@ -353,8 +413,9 @@ async function testImageEmbed() {
     const res = await post('/embeddings/image', {
       input: { type: 'base64', data: 'abc123' },
     }, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('base64 missing mediaType → 400');
-    else fail('base64 missing mediaType should be 400', await res.json());
+    else fail('base64 missing mediaType should be 400', errData);
   }
 
   // Batch exceeds limit (MAX_IMAGE_BATCH_SIZE = 5)
@@ -363,8 +424,9 @@ async function testImageEmbed() {
       type: 'url', data: `https://example.com/img${i}.jpg`,
     }));
     const res = await post('/embeddings/image', { input: items }, 'bearer');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('batch > 5 → 400');
-    else fail('batch > 5 should be 400', await res.json());
+    else fail('batch > 5 should be 400', errData);
   }
 }
 
@@ -372,7 +434,7 @@ async function testImageEmbed() {
 
 async function fetchSamplePdfBase64(): Promise<string | null> {
   try {
-    const res = await fetch('https://pdfobject.com/pdf/sample.pdf');
+    const res = await fetch('https://pdfobject.com/pdf/sample.pdf', { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     if (!res.ok) return null;
     const buf = await res.arrayBuffer();
     return Buffer.from(buf).toString('base64');
@@ -460,50 +522,45 @@ async function testDocEmbed() {
     console.log(' skipped (could not fetch sample PDF — check network)');
     return;
   }
-  console.log(` ok (${Math.round(pdfBase64.length * 0.75 / 1024)}KB)`);
+  console.log(` ok (${Math.round(pdfBase64.length * BASE64_TO_BYTES_RATIO / 1024)}KB)`);
 
   // PDF embed — full success assertions
   {
     const res = await post('/embeddings/doc', {
       input: { mimeType: 'application/pdf', data: pdfBase64, filename: 'test.pdf' },
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (!res.ok || !Array.isArray(data.embeddings)) {
       fail('PDF embed', data);
     } else {
-      const embeddings = data.embeddings as { index: number; embedding: number[]; dimensions: number }[];
-      const doc = data.document as Record<string, unknown>;
-      const usage = data.usage as Record<string, unknown>;
+      const embeddings = data.embeddings as EmbeddingResult[];
+      const doc = data.document as DocumentMetadata;
+      const usage = data.usage as UsageData;
 
-      // embedding shape
       if (embeddings.length !== 1)
         fail(`PDF → expected 1 embedding, got ${embeddings.length}`);
       else if (embeddings[0].index !== 0)
         fail(`PDF → expected index=0, got ${embeddings[0].index}`);
-      else if (embeddings[0].dimensions !== 3072)
-        fail(`PDF → expected dims=3072, got ${embeddings[0].dimensions}`);
+      else if (embeddings[0].dimensions !== EXPECTED_GEMINI_DIMENSIONS)
+        fail(`PDF → expected dims=${EXPECTED_GEMINI_DIMENSIONS}, got ${embeddings[0].dimensions}`);
       else if (embeddings[0].embedding.length !== embeddings[0].dimensions)
         fail('PDF → embedding length does not match dimensions field');
-      // embedding values are real floats, not all zeros
       else if (!embeddings[0].embedding.every(v => typeof v === 'number' && isFinite(v)))
         fail('PDF → embedding contains non-finite values');
       else if (embeddings[0].embedding.every(v => v === 0))
         fail('PDF → embedding is all zeros');
-      // response envelope
       else if (data.success !== true)
         fail(`PDF → success should be true, got ${data.success}`);
-      else if (data.model !== 'gemini-embedding-2-preview')
+      else if (data.model !== EXPECTED_GEMINI_MODEL)
         fail(`PDF → unexpected model: ${data.model}`);
       else if (typeof data.request_id !== 'string')
         fail('PDF → request_id missing');
       else if (typeof data.latency_ms !== 'number' || data.latency_ms < 0)
         fail('PDF → latency_ms missing or negative');
-      // usage
       else if (typeof usage?.total_tokens !== 'number' || usage.total_tokens <= 0)
         fail('PDF → total_tokens should be > 0');
       else if (typeof usage?.estimated_cost_usd !== 'number')
         fail('PDF → estimated_cost_usd missing');
-      // document metadata
       else if (doc?.chunks !== 1)
         fail(`PDF → doc.chunks should be 1, got ${doc?.chunks}`);
       else if (doc?.mimeType !== 'application/pdf')
@@ -512,7 +569,6 @@ async function testDocEmbed() {
         fail(`PDF → doc.type should be "PDF", got ${doc?.type}`);
       else if (doc?.filename !== 'test.pdf')
         fail(`PDF → doc.filename should be "test.pdf", got ${doc?.filename}`);
-      // must NOT have DOCX/XLSX-only fields
       else if (doc?.max_pages !== undefined)
         fail(`PDF → doc.max_pages should be absent, got ${doc.max_pages}`);
       else if (doc?.total_chars !== undefined)
@@ -527,8 +583,8 @@ async function testDocEmbed() {
     const res = await post('/embeddings/doc', {
       input: { mimeType: 'application/pdf', data: pdfBase64, filename: 'my file (v2).pdf' },
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
-    const doc = data.document as Record<string, unknown> | undefined;
+    const data = await res.json() as ApiResponse;
+    const doc = data.document;
     if (res.ok && typeof doc?.filename === 'string' && !doc.filename.includes(' ') && !doc.filename.includes('('))
       pass(`PDF filename sanitised → "${doc.filename}"`);
     else fail('PDF filename sanitisation', data);
@@ -539,9 +595,8 @@ async function testDocEmbed() {
     const res = await post('/embeddings/doc', {
       input: { mimeType: 'application/pdf', data: pdfBase64 },
     }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
-    const doc = data.document as Record<string, unknown> | undefined;
-    if (res.ok && doc?.filename === 'document.pdf')
+    const data = await res.json() as ApiResponse;
+    if (res.ok && data.document?.filename === 'document.pdf')
       pass('PDF default filename → document.pdf');
     else fail('PDF default filename', data);
   }
@@ -555,7 +610,7 @@ async function testAdminRoutes() {
     const res = await fetch(`${API_URL}/admin/tenant?id=${TENANT_ID}`, {
       headers: { 'X-Admin-Key': ADMIN_KEY },
     });
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.ok && data.tenant_id === TENANT_ID) pass('GET /admin/tenant → found');
     else fail('GET /admin/tenant', data);
   }
@@ -565,8 +620,9 @@ async function testAdminRoutes() {
     const res = await fetch(`${API_URL}/admin/tenant?id=nonexistent-tenant-xyz`, {
       headers: { 'X-Admin-Key': ADMIN_KEY },
     });
+    const errData = res.status !== 404 ? await res.json() : null;
     if (res.status === 404) pass('GET /admin/tenant (nonexistent) → 404');
-    else fail('GET /admin/tenant (nonexistent) should be 404', await res.json());
+    else fail('GET /admin/tenant (nonexistent) should be 404', errData);
   }
 
   // List tenants
@@ -574,7 +630,7 @@ async function testAdminRoutes() {
     const res = await fetch(`${API_URL}/admin/tenants`, {
       headers: { 'X-Admin-Key': ADMIN_KEY },
     });
-    const data = await res.json() as Record<string, unknown>;
+    const data = await res.json() as ApiResponse;
     if (res.ok && Array.isArray(data.tenants) && typeof data.count === 'number') pass('GET /admin/tenants → list with count');
     else fail('GET /admin/tenants', data);
   }
@@ -589,9 +645,8 @@ async function testAdminRoutes() {
       const res = await fetch(`${API_URL}/admin/tenants?limit=1`, {
         headers: { 'X-Admin-Key': ADMIN_KEY },
       });
-      const data = await res.json() as Record<string, unknown>;
-      const tenants = data.tenants as unknown[];
-      if (res.ok && Array.isArray(tenants) && tenants.length === 1 && typeof data.next_cursor === 'string') {
+      const data = await res.json() as ApiResponse;
+      if (res.ok && Array.isArray(data.tenants) && data.tenants.length === 1 && typeof data.next_cursor === 'string') {
         pass('GET /admin/tenants?limit=1 → exactly 1 result + next_cursor');
       } else {
         fail('GET /admin/tenants?limit=1', data);
@@ -604,15 +659,17 @@ async function testAdminRoutes() {
   // Duplicate tenant
   {
     const res = await post('/admin/tenant', { id: TENANT_ID, name: 'Duplicate' }, 'admin');
+    const errData = res.status !== 409 ? await res.json() : null;
     if (res.status === 409) pass('duplicate tenant → 409');
-    else fail('duplicate should be 409', await res.json());
+    else fail('duplicate should be 409', errData);
   }
 
   // Invalid tenant ID
   {
     const res = await post('/admin/tenant', { id: 'INVALID ID!', name: 'Bad' }, 'admin');
+    const errData = res.status !== 400 ? await res.json() : null;
     if (res.status === 400) pass('invalid tenant ID → 400');
-    else fail('invalid tenant ID should be 400', await res.json());
+    else fail('invalid tenant ID should be 400', errData);
   }
 
   // Wrong HTTP method on admin route
@@ -622,8 +679,9 @@ async function testAdminRoutes() {
       headers: { 'X-Admin-Key': ADMIN_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: 'test', name: 'Test' }),
     });
+    const errData = res.status !== 405 ? await res.json() : null;
     if (res.status === 405) pass('PUT /admin/tenant → 405');
-    else fail('PUT /admin/tenant should be 405', await res.json());
+    else fail('PUT /admin/tenant should be 405', errData);
   }
 
   // Wrong admin key
@@ -631,22 +689,24 @@ async function testAdminRoutes() {
     const res = await fetch(`${API_URL}/admin/tenants`, {
       headers: { 'X-Admin-Key': 'wrong-key' },
     });
+    const errData = res.status !== 401 ? await res.json() : null;
     if (res.status === 401) pass('wrong admin key → 401');
-    else fail('wrong admin key should be 401', await res.json());
+    else fail('wrong admin key should be 401', errData);
   }
 
   // Delete nonexistent tenant
   {
     const res = await del(`/admin/tenant?id=nonexistent-tenant-xyz`);
+    const errData = res.status !== 404 ? await res.json() : null;
     if (res.status === 404) pass('DELETE /admin/tenant (nonexistent) → 404');
-    else fail('DELETE /admin/tenant (nonexistent) should be 404', await res.json());
+    else fail('DELETE /admin/tenant (nonexistent) should be 404', errData);
   }
 }
 
 async function teardown() {
   console.log('\n[cleanup]');
   const res = await del(`/admin/tenant?id=${TENANT_ID}`);
-  const data = await res.json() as Record<string, unknown>;
+  const data = await res.json() as ApiResponse;
   if (res.ok) pass(`Deleted tenant '${TENANT_ID}'`);
   else fail('DELETE /admin/tenant', data);
 }
