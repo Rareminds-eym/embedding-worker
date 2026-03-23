@@ -206,7 +206,7 @@ export async function handleDocEmbed(
     if (err instanceof WorkerError || err instanceof ValidationError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const isTimeout = /timeout|timed out/i.test(msg);
-    console.error(JSON.stringify({ event: 'toMarkdown.error', tenant_id: ctx.tenantId, filename, mimeType, error: msg }));
+    console.error(JSON.stringify({ event: 'toMarkdown.error', tenant_id: ctx.tenantId, filename, mimeType, binary_size: binaryData.length, request_id: ctx.requestId, error: msg }));
     throw new WorkerError(
       isTimeout
         ? 'Document conversion timed out. The file may be too large or complex.'

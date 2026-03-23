@@ -218,20 +218,19 @@ async function testTextEmbed() {
   }
 }
 
-// Test images: stable public URLs + base64 fallback
+// Test images as base64 — no external service dependency
 const TEST_IMAGES = {
-  url1: 'https://httpbin.org/image/jpeg',
-  url2: 'https://httpbin.org/image/png',
+  jpeg: '/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/2wBDAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAv/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFQEBAQAAAAAAAAAAAAAAAAAAAAX/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIRAxEAPwDX8Q8A/9k=',
   png: 'iVBORw0KGgoAAAANSUhEUgAAABwAAAA4CAIAAABhUg/jAAAAMklEQVR4nO3MQREAMAgAoLkoFreTiSzhy4MARGe9bX99lEqlUqlUKpVKpVKpVCqVHksHaBwCA2cPf0cAAAAASUVORK5CYII=',
 };
 
 async function testImageEmbed() {
   console.log('\n[image]');
 
-  // Single URL image — full success shape
+  // Single base64 image — full success shape
   {
     const res = await post('/embeddings/image', {
-      input: { type: 'url', data: TEST_IMAGES.url1 },
+      input: { type: 'base64', data: TEST_IMAGES.jpeg, mediaType: 'image/jpeg' },
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
     if (!res.ok || !Array.isArray(data.embedding)) { fail('single image', data); }
@@ -254,8 +253,8 @@ async function testImageEmbed() {
   {
     const res = await post('/embeddings/image', {
       input: [
-        { type: 'url', data: TEST_IMAGES.url1 },
-        { type: 'url', data: TEST_IMAGES.url2 },
+        { type: 'base64', data: TEST_IMAGES.jpeg, mediaType: 'image/jpeg' },
+        { type: 'base64', data: TEST_IMAGES.png, mediaType: 'image/png' },
       ],
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
@@ -277,7 +276,7 @@ async function testImageEmbed() {
   // Model override — model param is not supported, expect 400
   {
     const res = await post('/embeddings/image', {
-      input: { type: 'url', data: TEST_IMAGES.url1 },
+      input: { type: 'base64', data: TEST_IMAGES.jpeg, mediaType: 'image/jpeg' },
       model: 'voyage-multimodal-3',
     }, 'bearer');
     if (res.status === 400) pass('model override → 400 (not supported)');

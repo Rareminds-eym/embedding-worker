@@ -153,6 +153,8 @@ async function callWithRetry<T>(
 
     let res: Response;
     try {
+      const MIN_REQUEST_TIMEOUT_MS = 1_000;
+      const requestTimeoutMs = Math.max(MIN_REQUEST_TIMEOUT_MS, Math.min(GEMINI.timeoutMs, remainingMs));
       res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -160,7 +162,7 @@ async function callWithRetry<T>(
           [GEMINI.authHeader]: apiKey,
         },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(Math.max(1_000, Math.min(GEMINI.timeoutMs, remainingMs))),
+        signal: AbortSignal.timeout(requestTimeoutMs),
       });
     } catch {
       if (attempt < MAX_RETRIES) {
@@ -230,7 +232,9 @@ async function callWithRetry<T>(
       return validate(json);
     } catch (err) {
       if (err instanceof ProviderError || err instanceof RateLimitError) throw err;
-      if (err instanceof SyntaxError || (err && typeof err === 'object' && 'name' in err && err.name === 'SyntaxError')) {
+      if (err instanceof SyntaxError || err instanceof TypeError ||
+          (err && typeof err === 'object' && 'name' in err &&
+           (err.name === 'SyntaxError' || err.name === 'TypeError'))) {
         throw new ProviderError(`${ctx.endpoint} provider returned invalid JSON`, 502);
       }
       console.error(JSON.stringify({ event: 'provider.invalid_response', provider: GEMINI.name, endpoint: ctx.endpoint, tenant_id: ctx.tenantId, model: ctx.model, error: err instanceof Error ? err.message : String(err) }));

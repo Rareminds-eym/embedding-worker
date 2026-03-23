@@ -28,11 +28,14 @@ function tryParseJsonString(v: string): unknown | null {
 
 function extractText(value: unknown, key?: string, depth = 0, budget = { left: TEXT_MAX_CHARS }, seen = new WeakSet()): string {
   if (budget.left <= 0 || value === null || value === undefined) return '';
-  if (depth > 20) return '';
+  if (depth > 10) return '';
 
   if (typeof value === 'object' && value !== null) {
     if (seen.has(value)) return '';
     seen.add(value);
+    if (Array.isArray(value) && value.length > 1000) {
+      value = value.slice(0, 1000) as unknown[];
+    }
   }
 
   if (typeof value === 'string') {
