@@ -53,16 +53,12 @@ export async function authenticate(request: Request, env: Env, requestId: string
 export async function authenticateAdmin(request: Request, env: Env): Promise<void> {
   const key = request.headers.get('X-Admin-Key') ?? '';
   const expected = env.ADMIN_KEY ?? '';
-  if (key.length === 0 || expected.length === 0) {
-    throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
-  }
   const enc = new TextEncoder();
   const [hashA, hashB] = await Promise.all([
     crypto.subtle.digest('SHA-256', enc.encode(key)),
     crypto.subtle.digest('SHA-256', enc.encode(expected)),
   ]);
-  // timingSafeEqual is synchronous — do not await
-  if (!crypto.subtle.timingSafeEqual(hashA, hashB)) {
+  if (key.length === 0 || expected.length === 0 || !crypto.subtle.timingSafeEqual(hashA, hashB)) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
   }
 }

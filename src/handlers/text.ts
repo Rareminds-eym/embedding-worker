@@ -23,22 +23,29 @@ function tryParseJsonString(v: string): unknown | null {
   try { return JSON.parse(v); } catch { return null; }
 }
 
-function extractText(value: unknown, key?: string, depth = 0, budget = { left: TEXT_MAX_CHARS }): string {
+function extractText(value: unknown, key?: string, depth = 0, budget = { left: TEXT_MAX_CHARS }, seen = new WeakSet()): string {
   if (budget.left <= 0 || value === null || value === undefined) return '';
   if (depth > 10) return '';
+
+  if (typeof value === 'object' && value !== null) {
+    if (seen.has(value)) return '';
+    seen.add(value);
+  }
 
   if (typeof value === 'string') {
     const v = value.trim();
     if (!v || v === '[]' || v === '{}') return '';
     const parsed = tryParseJsonString(v);
-    if (parsed !== null) return extractText(parsed, key, depth + 1, budget);
+    if (parsed !== null) return extractText(parsed, key, depth + 1, budget, seen);
     const out = key ? `${key}: ${v}` : v;
+    if (out.length > budget.left) { const truncated = out.slice(0, budget.left); budget.left = 0; return truncated; }
     budget.left -= out.length;
     return out;
   }
 
   if (typeof value === 'number') {
     const out = key ? `${key}: ${value}` : String(value);
+    if (out.length > budget.left) { const truncated = out.slice(0, budget.left); budget.left = 0; return truncated; }
     budget.left -= out.length;
     return out;
   }
@@ -46,13 +53,14 @@ function extractText(value: unknown, key?: string, depth = 0, budget = { left: T
   if (typeof value === 'boolean') {
     if (!value) return '';
     const out = key ? `${key}: ${value}` : String(value);
+    if (out.length > budget.left) { const truncated = out.slice(0, budget.left); budget.left = 0; return truncated; }
     budget.left -= out.length;
     return out;
   }
 
   if (Array.isArray(value)) {
     const items = value
-      .map(item => extractText(item, undefined, depth + 1, budget))
+      .map(item => extractText(item, undefined, depth + 1, budget, seen))
       .filter(Boolean)
       .join(', ');
     return items ? (key ? `${key}: ${items}` : items) : '';
@@ -61,7 +69,7 @@ function extractText(value: unknown, key?: string, depth = 0, budget = { left: T
   if (typeof value === 'object') {
     return Object.entries(value as Record<string, unknown>)
       .filter(([k]) => !shouldSkip(k))
-      .map(([k, v]) => extractText(v, k, depth + 1, budget))
+      .map(([k, v]) => extractText(v, k, depth + 1, budget, seen))
       .filter(Boolean)
       .join(' ');
   }

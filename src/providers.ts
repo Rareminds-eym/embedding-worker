@@ -145,7 +145,7 @@ async function callWithRetry<T>(
   const TOTAL_DEADLINE_MS = 60_000; // Allow for retries with 30s per-request timeout
   const deadline = Date.now() + TOTAL_DEADLINE_MS;
 
-  for (let attempt = 0; ; attempt++) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) throw new ProviderError(`${ctx.endpoint} provider unreachable`, 502);
 
@@ -224,13 +224,16 @@ async function callWithRetry<T>(
     }
 
     try {
-      return validate(await res.json());
+      const json = await res.json();
+      return validate(json);
     } catch (err) {
       if (err instanceof ProviderError || err instanceof RateLimitError) throw err;
+      if (err instanceof SyntaxError) throw new ProviderError(`${ctx.endpoint} provider returned invalid JSON`, 502);
       console.error(JSON.stringify({ event: 'provider.invalid_response', provider: GEMINI.name, endpoint: ctx.endpoint, tenant_id: ctx.tenantId, model: ctx.model, error: err instanceof Error ? err.message : String(err) }));
       throw new ProviderError(`${ctx.endpoint} provider returned an invalid response`, 502);
     }
   }
+  throw new ProviderError(`${ctx.endpoint} provider unreachable`, 502);
 }
 
 // ============================================================================
@@ -316,7 +319,7 @@ export async function callTextProvider(
   taskType: string = GEMINI.textTaskType,
 ): Promise<TextProviderResponse> {
   const embeddings = await callBatchEmbedContents(inputs, apiKey, tenantId, taskType);
-  const estimatedTokens = inputs.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0);
+  const estimatedTokens = inputs.reduce((sum, text) => sum + Math.ceil(text.length / 3.5), 0);
   return {
     data: embeddings.map(embedding => ({ embedding })),
     usage: { total_tokens: estimatedTokens },

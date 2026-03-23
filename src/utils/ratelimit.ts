@@ -36,6 +36,11 @@ export async function checkRateLimit(
     );
   }
 
+  const safetyMargin = Math.min(5, Math.ceil(limit * 0.1));
+  if (count >= limit - safetyMargin) {
+    console.warn(JSON.stringify({ event: 'rate_limit.approaching_threshold', tenant_id: tenantId, endpoint, count, limit }));
+  }
+
   // KV write failure is non-fatal — rate limit check already passed, don't block the request
   try {
     await env.EMBEDDING_KV.put(key, String(count + 1), { expirationTtl: RATE_LIMIT_WINDOW_SECONDS * 2 });

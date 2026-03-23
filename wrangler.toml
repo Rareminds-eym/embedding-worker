@@ -84,7 +84,7 @@ ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
 
 [[env.production.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"
+id = "REPLACE_WITH_PRODUCTION_KV_ID"  # ⚠️ Must be replaced before deployment
 
 # wrangler secret put ADMIN_KEY      --env production
 # wrangler secret put GEMINI_API_KEY --env production

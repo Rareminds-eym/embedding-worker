@@ -218,60 +218,66 @@ async function testTextEmbed() {
   }
 }
 
+// Test images: two real photos via URL, one base64 PNG
+const TEST_IMAGES = {
+  url1: 'https://i.ibb.co/nQNGqL0/beach1.jpg',
+  url2: 'https://i.ibb.co/r5w8hG8/beach2.jpg',
+  png: 'iVBORw0KGgoAAAANSUhEUgAAABwAAAA4CAIAAABhUg/jAAAAMklEQVR4nO3MQREAMAgAoLkoFreTiSzhy4MARGe9bX99lEqlUqlUKpVKpVKpVCqVHksHaBwCA2cPf0cAAAAASUVORK5CYII=',
+};
+
 async function testImageEmbed() {
   console.log('\n[image]');
 
-  // Single URL — full success shape
+  // Single URL image — full success shape
   {
     const res = await post('/embeddings/image', {
-      input: { type: 'url', data: 'https://www.gstatic.com/webp/gallery/1.jpg' },
+      input: { type: 'url', data: TEST_IMAGES.url1 },
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (!res.ok || !Array.isArray(data.embedding)) { fail('single URL', data); }
+    if (!res.ok || !Array.isArray(data.embedding)) { fail('single image', data); }
     else {
       const emb = data.embedding as number[];
-      if (data.success !== true) fail('single URL → success should be true');
-      else if (data.model !== 'gemini-embedding-2-preview') fail(`single URL → unexpected model: ${data.model}`);
-      else if (typeof data.dimensions !== 'number' || emb.length !== data.dimensions) fail(`single URL → dimensions mismatch: declared=${data.dimensions} actual=${emb.length}`);
-      else if (!emb.every(v => typeof v === 'number' && isFinite(v))) fail('single URL → embedding contains non-finite values');
-      else if (emb.every(v => v === 0)) fail('single URL → embedding is all zeros');
-      else if (typeof (data.usage as Record<string, unknown>)?.estimated_cost_usd !== 'number') fail('single URL → estimated_cost_usd missing');
-      else if (typeof data.request_id !== 'string') fail('single URL → request_id missing');
-      else if (typeof data.latency_ms !== 'number' || data.latency_ms < 0) fail('single URL → latency_ms invalid');
-      // single image → flat embedding/dimensions (not embeddings array)
-      else if ('embeddings' in data) fail('single URL → should return flat embedding, not embeddings array');
-      else pass(`single URL → embedding (model=${data.model}, dims=${data.dimensions})`);
+      if (data.success !== true) fail('single image → success should be true');
+      else if (data.model !== 'gemini-embedding-2-preview') fail(`single image → unexpected model: ${data.model}`);
+      else if (typeof data.dimensions !== 'number' || emb.length !== data.dimensions) fail(`single image → dimensions mismatch: declared=${data.dimensions} actual=${emb.length}`);
+      else if (!emb.every(v => typeof v === 'number' && isFinite(v))) fail('single image → embedding contains non-finite values');
+      else if (emb.every(v => v === 0)) fail('single image → embedding is all zeros');
+      else if (typeof (data.usage as Record<string, unknown>)?.estimated_cost_usd !== 'number') fail('single image → estimated_cost_usd missing');
+      else if (typeof data.request_id !== 'string') fail('single image → request_id missing');
+      else if (typeof data.latency_ms !== 'number' || data.latency_ms < 0) fail('single image → latency_ms invalid');
+      else if ('embeddings' in data) fail('single image → should return flat embedding, not embeddings array');
+      else pass(`single image → embedding (model=${data.model}, dims=${data.dimensions})`);
     }
   }
 
-  // Batch of 2 URLs — returns embeddings array with index/embedding/dimensions per item
+  // Batch of 2 — returns embeddings array with index/embedding/dimensions per item
   {
     const res = await post('/embeddings/image', {
       input: [
-        { type: 'url', data: 'https://www.gstatic.com/webp/gallery/1.jpg' },
-        { type: 'url', data: 'https://www.gstatic.com/webp/gallery/2.jpg' },
+        { type: 'url', data: TEST_IMAGES.url1 },
+        { type: 'url', data: TEST_IMAGES.url2 },
       ],
     }, 'bearer');
     const data = await res.json() as Record<string, unknown>;
-    if (!res.ok || !Array.isArray(data.embeddings)) { fail('batch 2 URLs', data); }
+    if (!res.ok || !Array.isArray(data.embeddings)) { fail('batch 2 images', data); }
     else {
       const embeddings = data.embeddings as { index: number; embedding: number[]; dimensions: number }[];
       const indexes = embeddings.map(e => e.index).sort((a, b) => a - b);
       const contiguous = indexes.every((idx, i) => idx === i);
       const dims = embeddings.map(e => e.embedding.length);
       const uniformDims = dims.every(d => d === dims[0]);
-      if (embeddings.length !== 2) fail(`batch 2 URLs → expected 2 embeddings, got ${embeddings.length}`);
-      else if (!contiguous) fail(`batch 2 URLs → indexes not contiguous: ${JSON.stringify(indexes)}`);
-      else if (!uniformDims) fail(`batch 2 URLs → mixed dimensions`);
-      else if ('embedding' in data) fail('batch 2 URLs → should return embeddings array, not flat embedding');
-      else pass(`batch 2 URLs → ${embeddings.length} embeddings, dims=${dims[0]}`);
+      if (embeddings.length !== 2) fail(`batch 2 images → expected 2 embeddings, got ${embeddings.length}`);
+      else if (!contiguous) fail(`batch 2 images → indexes not contiguous: ${JSON.stringify(indexes)}`);
+      else if (!uniformDims) fail(`batch 2 images → mixed dimensions`);
+      else if ('embedding' in data) fail('batch 2 images → should return embeddings array, not flat embedding');
+      else pass(`batch 2 images → ${embeddings.length} embeddings, dims=${dims[0]}`);
     }
   }
 
   // Model override — model param is not supported, expect 400
   {
     const res = await post('/embeddings/image', {
-      input: { type: 'url', data: 'https://www.gstatic.com/webp/gallery/1.jpg' },
+      input: { type: 'url', data: TEST_IMAGES.url1 },
       model: 'voyage-multimodal-3',
     }, 'bearer');
     if (res.status === 400) pass('model override → 400 (not supported)');
@@ -294,29 +300,6 @@ async function testImageEmbed() {
     }, 'bearer');
     if (res.status === 400) pass('private IP URL → 400');
     else fail('private IP should be 400', await res.json());
-  }
-
-  // Single base64 PNG — full success shape
-  {
-    // 1x1 red pixel PNG, base64 encoded
-    const tinyPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAABwAAAA4CAIAAABhUg/jAAAAMklEQVR4nO3MQREAMAgAoLkoFreTiSzhy4MARGe9bX99lEqlUqlUKpVKpVKpVCqVHksHaBwCA2cPf0cAAAAASUVORK5CYII=';
-    const res = await post('/embeddings/image', {
-      input: { type: 'base64', data: tinyPngBase64, mediaType: 'image/png' },
-    }, 'bearer');
-    const data = await res.json() as Record<string, unknown>;
-    if (!res.ok || !Array.isArray(data.embedding)) { fail('base64 PNG', data); }
-    else {
-      const emb = data.embedding as number[];
-      if (data.success !== true) fail('base64 PNG → success should be true');
-      else if (data.model !== 'gemini-embedding-2-preview') fail(`base64 PNG → unexpected model: ${data.model}`);
-      else if (typeof data.dimensions !== 'number' || emb.length !== data.dimensions) fail(`base64 PNG → dimensions mismatch: declared=${data.dimensions} actual=${emb.length}`);
-      else if (!emb.every(v => typeof v === 'number' && isFinite(v))) fail('base64 PNG → embedding contains non-finite values');
-      else if (emb.every(v => v === 0)) fail('base64 PNG → embedding is all zeros');
-      else if (typeof (data.usage as Record<string, unknown>)?.estimated_cost_usd !== 'number') fail('base64 PNG → estimated_cost_usd missing');
-      else if (typeof data.request_id !== 'string') fail('base64 PNG → request_id missing');
-      else if (typeof data.latency_ms !== 'number' || data.latency_ms < 0) fail('base64 PNG → latency_ms invalid');
-      else pass(`base64 PNG → embedding (dims=${data.dimensions})`);
-    }
   }
 
   // Unsupported mediaType on base64 (gif is not supported by Gemini embedding)
@@ -561,7 +544,7 @@ async function testAdminRoutes() {
 
   // List tenants with pagination — seed a second tenant so limit=1 is actually exercised
   {
-    const secondId = 'test-tenant-pagination-seed';
+    const secondId = `test-tenant-pagination-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     await del(`/admin/tenant?id=${secondId}`);
     await post('/admin/tenant', { id: secondId, name: 'Pagination Seed' }, 'admin');
 

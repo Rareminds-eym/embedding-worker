@@ -56,7 +56,7 @@ function chunkText(text: string): string[] {
 
     if (start + slice.length >= text.length) break;
 
-    const advance = Math.max(slice.length - DOC_CHUNK_OVERLAP, Math.ceil(DOC_CHUNK_SIZE / 4));
+    const advance = Math.max(DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP, Math.ceil(DOC_CHUNK_SIZE / 4));
     start += advance;
   }
 
@@ -189,16 +189,19 @@ export async function handleDocEmbed(
       { conversionOptions: { pdf: { metadata: false } } }
     );
     const item = Array.isArray(results) ? results[0] : results;
-    if (!item || typeof item !== 'object' || typeof (item as Record<string, unknown>).format !== 'string') {
+    const record = item as Record<string, unknown>;
+    if (!item || typeof item !== 'object' || typeof record.name !== 'string' || typeof record.format !== 'string') {
       throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
     }
-    if (
-      (item as Record<string, unknown>).format !== 'error' &&
-      typeof (item as Record<string, unknown>).data !== 'string'
-    ) {
+    if (record.format !== 'error' && typeof record.data !== 'string') {
       throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
     }
-    conversionResult = item as { name: string; format: string; data?: string; error?: string };
+    conversionResult = {
+      name: record.name,
+      format: record.format,
+      data: record.data as string | undefined,
+      error: record.error as string | undefined,
+    };
   } catch (err) {
     if (err instanceof WorkerError || err instanceof ValidationError) throw err;
     const msg = err instanceof Error ? err.message : String(err);

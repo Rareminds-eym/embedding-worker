@@ -31,7 +31,11 @@ export function getCorsHeaders(request: Request, env?: Env): Record<string, stri
 }
 
 export function jsonOk(data: unknown, status = 200, request?: Request, env?: Env, requestId?: string): Response {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+  };
   if (request) Object.assign(headers, getCorsHeaders(request, env));
   if (requestId) headers['X-Request-ID'] = requestId;
   return new Response(JSON.stringify(data), { status, headers });
