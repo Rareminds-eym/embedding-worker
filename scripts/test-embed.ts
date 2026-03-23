@@ -26,7 +26,8 @@ let API_KEY = process.env.API_KEY || '';
 
 function pass(label: string) { console.log(`  ✅ ${label}`); }
 function fail(label: string, detail?: unknown) {
-  console.error(`  ❌ ${label}${detail !== undefined ? ` [${JSON.stringify(detail).slice(0, 120)}]` : ''}`);
+  console.error(`  ❌ ${label}`);
+  if (detail !== undefined) console.error('     ', JSON.stringify(detail, null, 2));
 }
 
 async function post(path: string, body: unknown, auth: 'bearer' | 'admin') {

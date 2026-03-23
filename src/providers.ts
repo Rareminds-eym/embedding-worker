@@ -20,7 +20,7 @@ export interface GeminiConfig {
   embedEndpoint: (model: string) => string;
   /** REST endpoint for batchEmbedContents */
   batchEmbedEndpoint: (model: string) => string;
-  /** Model used for ALL modalities (text, image, PDF, doc) */
+  /** Model used for text, image, and PDF embeddings */
   model: ModelConfig;
   /** Task type sent for text/document retrieval */
   textTaskType: string;
@@ -32,6 +32,8 @@ export interface GeminiConfig {
   maxPdfPagesPerRequest: number;
   /** Request timeout in ms */
   timeoutMs: number;
+  /** Auth header name for API key */
+  authHeader: string;
 }
 
 // All task types supported by gemini-embedding-2-preview.
@@ -70,6 +72,7 @@ export const GEMINI: GeminiConfig = {
   maxImagesPerRequest: 6,
   maxPdfPagesPerRequest: 6,
   timeoutMs: 30_000,
+  authHeader: 'x-goog-api-key',
 };
 
 // ============================================================================
@@ -152,7 +155,7 @@ async function callWithRetry<T>(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
+          [GEMINI.authHeader]: apiKey,
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(Math.min(GEMINI.timeoutMs, remainingMs)),
@@ -160,7 +163,8 @@ async function callWithRetry<T>(
     } catch {
       if (attempt < MAX_RETRIES) {
         const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
-        if (Date.now() + delay > deadline) throw new ProviderError(`${ctx.endpoint} provider unreachable`, 502);
+        const wouldExceedDeadline = Date.now() + delay > deadline;
+        if (wouldExceedDeadline) throw new ProviderError(`${ctx.endpoint} provider timeout after ${attempt + 1} attempts`, 502);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
@@ -182,8 +186,8 @@ async function callWithRetry<T>(
         return undefined;
       })();
       if (attempt < MAX_RETRIES) {
-        const retryMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds! > 0
-          ? retryAfterSeconds! * 1000
+        const retryMs = retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+          ? retryAfterSeconds * 1000
           : 2_000;
         if (Date.now() + retryMs > deadline) {
           throw new RateLimitError('Rate limit exceeded. Please wait before retrying.', retryAfterSeconds);
@@ -193,7 +197,7 @@ async function callWithRetry<T>(
       }
       console.error(JSON.stringify({ event: 'provider.rate_limit', provider: GEMINI.name, endpoint: ctx.endpoint, tenant_id: ctx.tenantId, model: ctx.model }));
       throw new RateLimitError(
-        `Rate limit exceeded. ${Number.isFinite(retryAfterSeconds) ? `Retry after ${retryAfterSeconds}s.` : 'Please wait before retrying.'}`,
+        `Rate limit exceeded. ${retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) ? `Retry after ${retryAfterSeconds}s.` : 'Please wait before retrying.'}`,
         retryAfterSeconds,
       );
     }
@@ -312,9 +316,10 @@ export async function callTextProvider(
   taskType: string = GEMINI.textTaskType,
 ): Promise<TextProviderResponse> {
   const embeddings = await callBatchEmbedContents(inputs, apiKey, tenantId, taskType);
+  const estimatedTokens = inputs.reduce((sum, text) => sum + Math.ceil(text.length / 4), 0);
   return {
     data: embeddings.map(embedding => ({ embedding })),
-    usage: { total_tokens: 0 },
+    usage: { total_tokens: estimatedTokens },
     _model: GEMINI.model.id,
     _provider: GEMINI.name,
   };
@@ -341,10 +346,9 @@ export async function callImageBatchProvider(
   apiKey: string,
   tenantId: string,
 ): Promise<ImageProviderResponse> {
-  const MAX_IMAGE_BATCH_CONCURRENCY = 6;
   const results: { embedding: number[]; index: number }[] = [];
-  for (let offset = 0; offset < itemParts.length; offset += MAX_IMAGE_BATCH_CONCURRENCY) {
-    const window = itemParts.slice(offset, offset + MAX_IMAGE_BATCH_CONCURRENCY);
+  for (let offset = 0; offset < itemParts.length; offset += GEMINI.maxImagesPerRequest) {
+    const window = itemParts.slice(offset, offset + GEMINI.maxImagesPerRequest);
     const windowResults = await Promise.all(
       window.map((parts, i) =>
         callEmbedContent(parts, apiKey, tenantId, 'image').then(embedding => ({ embedding, index: offset + i }))

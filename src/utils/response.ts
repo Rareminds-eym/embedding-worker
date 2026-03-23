@@ -100,7 +100,14 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
   }
 
   if (err instanceof Error) {
-    console.error(JSON.stringify({ event: 'unhandled_error', request_id: requestId, message: err.message, stack: err.stack }));
+    console.error(JSON.stringify({
+      event: 'unhandled_error',
+      request_id: requestId,
+      message: err.message,
+      name: err.name,
+      stack: err.stack,
+      timestamp: new Date().toISOString(),
+    }));
   }
   return new Response(
     JSON.stringify({ success: false, errorCode: ERROR_CODES.INTERNAL_ERROR, message: 'Internal server error', request_id: requestId }),

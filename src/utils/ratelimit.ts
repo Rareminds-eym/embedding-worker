@@ -36,5 +36,10 @@ export async function checkRateLimit(
     );
   }
 
-  await env.EMBEDDING_KV.put(key, String(count + 1), { expirationTtl: RATE_LIMIT_WINDOW_SECONDS * 2 });
+  // KV write failure is non-fatal — rate limit check already passed, don't block the request
+  try {
+    await env.EMBEDDING_KV.put(key, String(count + 1), { expirationTtl: RATE_LIMIT_WINDOW_SECONDS * 2 });
+  } catch (err) {
+    console.error(JSON.stringify({ event: 'rate_limit.kv_write_failed', tenant_id: tenantId, endpoint, error: err instanceof Error ? err.message : String(err) }));
+  }
 }

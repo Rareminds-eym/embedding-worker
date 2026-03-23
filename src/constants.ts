@@ -25,7 +25,6 @@ export const DOC_CHUNK_OVERLAP = 400;
 export const DOC_MAX_CHUNKS = 50;
 export const DOC_MAX_PAGES = 100;
 export const DOC_CHARS_PER_PAGE = 3_000;
-export const DOC_MIN_CONTENT_CHARS = 50;
 export const DOC_BATCH_SIZE = 10;
 export const MAX_DOC_BATCH_CONCURRENCY = 4;
 
