@@ -75,6 +75,8 @@ const EXPECTED_GEMINI_DIMENSIONS = 3072;
 const EXPECTED_GEMINI_MODEL = 'gemini-embedding-2-preview';
 const FETCH_TIMEOUT_MS = 10_000;
 const BASE64_TO_BYTES_RATIO = 0.75;
+const MAX_IMAGE_BATCH_SIZE = 5;
+const BATCH_EXCEEDS_LIMIT_TEST_SIZE = MAX_IMAGE_BATCH_SIZE + 1;
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -418,15 +420,15 @@ async function testImageEmbed() {
     else fail('base64 missing mediaType should be 400', errData);
   }
 
-  // Batch exceeds limit (MAX_IMAGE_BATCH_SIZE = 5)
+  // Batch exceeds limit
   {
-    const items = Array.from({ length: 6 }, (_, i) => ({
+    const items = Array.from({ length: BATCH_EXCEEDS_LIMIT_TEST_SIZE }, (_, i) => ({
       type: 'url', data: `https://example.com/img${i}.jpg`,
     }));
     const res = await post('/embeddings/image', { input: items }, 'bearer');
     const errData = res.status !== 400 ? await res.json() : null;
-    if (res.status === 400) pass('batch > 5 → 400');
-    else fail('batch > 5 should be 400', errData);
+    if (res.status === 400) pass(`batch > ${MAX_IMAGE_BATCH_SIZE} → 400`);
+    else fail(`batch > ${MAX_IMAGE_BATCH_SIZE} should be 400`, errData);
   }
 }
 

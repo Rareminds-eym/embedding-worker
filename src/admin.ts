@@ -171,33 +171,6 @@ async function deleteTenant(request: Request, env: Env): Promise<Response> {
   } while (tkCursor);
   await Promise.all(apiKeyDeletes);
 
-  // Legacy full-scan removed: tenant_keys: reverse index above handles all key cleanup.
-  // If pre-index keys exist, run DELETE /admin/tenant?id=<id>&legacy_cleanup=true once.
-  const legacyCleanup = new URL(request.url).searchParams.get('legacy_cleanup') === 'true';
-  if (legacyCleanup) {
-    // Audit log: this triggers an O(n) full api_keys: scan — visible in production observability.
-    console.warn(JSON.stringify({ event: 'admin.legacy_cleanup_triggered', tenant_id: id }));
-    let legacyCursor: string | undefined;
-    const legacyDeletes: Promise<void>[] = [];
-    do {
-      const page = await env.EMBEDDING_KV.list({ prefix: 'api_keys:', limit: 100, cursor: legacyCursor });
-      const reads = await Promise.all(page.keys.map(k => env.EMBEDDING_KV.get(k.name).then(raw => ({ k, raw }))));
-      for (const { k, raw } of reads) {
-        if (raw) {
-          try {
-            const rec: ApiKeyRecord = JSON.parse(raw);
-            if (rec.tenant_id === id) {
-              console.error(JSON.stringify({ event: 'admin.legacy_key_cleanup', tenant_id: id, key: k.name }));
-              legacyDeletes.push(env.EMBEDDING_KV.delete(k.name));
-            }
-          } catch { /* skip corrupt records */ }
-        }
-      }
-      legacyCursor = page.list_complete ? undefined : page.cursor;
-    } while (legacyCursor);
-    await Promise.all(legacyDeletes);
-  }
-
   await env.EMBEDDING_KV.delete(`tenant:${id}`);
 
   let rlCursor: string | undefined;

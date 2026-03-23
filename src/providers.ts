@@ -155,6 +155,12 @@ function isGeminiBatchResponse(json: unknown, expectedCount: number): json is Ge
 }
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+const ERROR_PREVIEW_MAX_CHARS = 200;
+
+// ============================================================================
 // Retry-aware fetch
 // ============================================================================
 
@@ -259,7 +265,16 @@ async function callWithRetry<T>(
     }
 
     if (!res.ok) {
-      const errorBody = await res.text().catch(() => '');
+      const errorBody = await res.text().catch((err) => {
+        console.error(JSON.stringify({
+          event: 'response_body_read_failed',
+          provider: GEMINI.name,
+          endpoint: ctx.endpoint,
+          tenant_id: ctx.tenantId,
+          error: err instanceof Error ? err.message : String(err),
+        }));
+        return '';
+      });
       console.error(JSON.stringify({
         event: 'provider.error',
         provider: GEMINI.name,
@@ -268,9 +283,9 @@ async function callWithRetry<T>(
         tenant_id: ctx.tenantId,
         model: ctx.model,
         response_bytes: errorBody.length,
-        response_preview: errorBody.slice(0, 200),
+        response_preview: errorBody.slice(0, ERROR_PREVIEW_MAX_CHARS),
       }));
-      throw new ProviderError(`${ctx.endpoint} provider error (${res.status})`, res.status);
+      throw new ProviderError(`${GEMINI.name} ${ctx.endpoint} provider error (${res.status})`, res.status);
     }
 
     try {
@@ -313,7 +328,7 @@ async function callEmbedContent(
     body,
     (json) => {
       if (!isGeminiEmbedResponse(json)) {
-        throw new ProviderError(`Invalid response from ${GEMINI.name} ${endpointLabel}`, 502);
+        throw new ProviderError(`${GEMINI.name} ${endpointLabel} provider returned invalid response`, 502);
       }
       return json.embedding.values;
     },
@@ -346,11 +361,11 @@ async function callBatchEmbedContents(
     body,
     (json) => {
       if (!isGeminiBatchResponse(json, texts.length)) {
-        throw new ProviderError(`Invalid batch response from ${GEMINI.name}`, 502);
+        throw new ProviderError(`${GEMINI.name} batch-text provider returned invalid response`, 502);
       }
       return json.embeddings.map((e, i) => {
         if (!e?.values || !Array.isArray(e.values) || e.values.length === 0) {
-          throw new ProviderError(`Missing embedding at index ${i} from ${GEMINI.name}`, 502);
+          throw new ProviderError(`${GEMINI.name} batch-text missing embedding at index ${i}`, 502);
         }
         return e.values;
       });
@@ -363,7 +378,14 @@ async function callBatchEmbedContents(
 // Public provider functions
 // ============================================================================
 
-/** Embed one or more text strings. */
+/**
+ * Embed one or more text strings using Gemini's batchEmbedContents API.
+ * @param inputs - Array of text strings to embed
+ * @param apiKey - Gemini API key
+ * @param tenantId - Tenant identifier for logging and error tracking
+ * @param taskType - Gemini task type (defaults to RETRIEVAL_DOCUMENT)
+ * @returns Promise resolving to text embeddings with usage metadata
+ */
 export async function callTextProvider(
   inputs: string[],
   apiKey: string,
@@ -380,7 +402,13 @@ export async function callTextProvider(
   };
 }
 
-/** Embed a single image (base64 or URL fetched by caller). */
+/**
+ * Embed a single image using Gemini's embedContent API.
+ * @param parts - Gemini parts array (typically one inline_data element)
+ * @param apiKey - Gemini API key
+ * @param tenantId - Tenant identifier for logging and error tracking
+ * @returns Promise resolving to image embedding with usage metadata
+ */
 export async function callImageProvider(
   parts: GeminiPart[],
   apiKey: string,
@@ -395,7 +423,15 @@ export async function callImageProvider(
   };
 }
 
-/** Embed a batch of images (one embedContent call per image, concurrently). */
+/**
+ * Embed a batch of images (one embedContent call per image, concurrently).
+ * Uses Promise.allSettled to ensure one failing image doesn't kill the entire batch.
+ * @param itemParts - Array of Gemini parts arrays (one per image)
+ * @param apiKey - Gemini API key
+ * @param tenantId - Tenant identifier for logging and error tracking
+ * @returns Promise resolving to batch image embeddings with usage metadata
+ * @throws ProviderError if any image in the batch fails to embed
+ */
 export async function callImageBatchProvider(
   itemParts: GeminiPart[][],
   apiKey: string,
@@ -438,7 +474,14 @@ export async function callImageBatchProvider(
   };
 }
 
-/** Embed a PDF document directly (inline_data with application/pdf). */
+/**
+ * Embed a PDF document directly using Gemini's native multimodal embedContent API.
+ * Gemini processes the visual and text content of each page natively (max 6 pages).
+ * @param pdfBase64 - Base64-encoded PDF data
+ * @param apiKey - Gemini API key
+ * @param tenantId - Tenant identifier for logging and error tracking
+ * @returns Promise resolving to a single embedding vector for the entire PDF
+ */
 export async function callPdfProvider(
   pdfBase64: string,
   apiKey: string,
@@ -452,7 +495,16 @@ export async function callPdfProvider(
   );
 }
 
-/** Embed document text chunks via batchEmbedContents. */
+/**
+ * Embed document text chunks via batchEmbedContents with concurrency control.
+ * Processes chunks in batches of DOC_BATCH_SIZE with MAX_DOC_BATCH_CONCURRENCY
+ * concurrent batch requests. Results are written directly into pre-allocated slots.
+ * @param chunks - Array of text chunks to embed
+ * @param apiKey - Gemini API key
+ * @param tenantId - Tenant identifier for logging and error tracking
+ * @returns Promise resolving to document embeddings with metadata
+ * @throws ProviderError if any batch fails to process
+ */
 export async function callDocProvider(
   chunks: string[],
   apiKey: string,

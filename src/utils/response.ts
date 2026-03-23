@@ -120,12 +120,10 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
       timestamp: new Date().toISOString(),
     }));
   }
-  const isProduction = (env as Env | undefined)?.ENVIRONMENT === 'production';
-  const clientMessage = isProduction
-    ? 'Internal server error'
-    : (err instanceof Error ? err.message : 'Internal server error');
+  // Never expose internal error details to clients, even in non-production.
+  // Full error context is logged server-side above for debugging.
   return new Response(
-    JSON.stringify({ success: false, errorCode: ERROR_CODES.INTERNAL_ERROR, message: clientMessage, request_id: requestId }),
+    JSON.stringify({ success: false, errorCode: ERROR_CODES.INTERNAL_ERROR, message: 'Internal server error', request_id: requestId }),
     { status: 500, headers }
   );
 }

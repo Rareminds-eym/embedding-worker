@@ -31,13 +31,17 @@ function extractText(value: unknown, key?: string, depth = 0, budget = { left: T
   if (depth > 10) return '';
 
   if (typeof value === 'object' && value !== null) {
+    // Check for circular reference before any mutation
     if (seen.has(value)) return '';
+    
     // Truncate large arrays before registering in the seen-set to avoid
     // holding a reference to the full array for the lifetime of the traversal.
     if (Array.isArray(value) && value.length > 1000) {
+      seen.add(value as object); // Register original first
       value = value.slice(0, 1000) as unknown[];
+    } else {
+      seen.add(value as object);
     }
-    seen.add(value as object);
   }
 
   if (typeof value === 'string') {
@@ -75,11 +79,13 @@ function extractText(value: unknown, key?: string, depth = 0, budget = { left: T
   }
 
   if (typeof value === 'object') {
-    return Object.entries(value as Record<string, unknown>)
-      .filter(([k]) => !shouldSkip(k))
-      .map(([k, v]) => extractText(v, k, depth + 1, budget, seen))
-      .filter(Boolean)
-      .join(' ');
+    const parts: string[] = [];
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (shouldSkip(k) || budget.left <= 0) continue;
+      const text = extractText(v, k, depth + 1, budget, seen);
+      if (text) parts.push(text);
+    }
+    return parts.join(' ');
   }
 
   return '';

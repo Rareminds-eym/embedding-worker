@@ -156,7 +156,7 @@ export async function handleDocEmbed(
       );
     }
 
-    const embedding = await callPdfProvider(input.data as string, env.GEMINI_API_KEY, ctx.tenantId);
+    const embedding = await callPdfProvider(input.data, env.GEMINI_API_KEY, ctx.tenantId);
     // Gemini REST does not return token counts — estimate at ~4 chars/token using binary size
     const estimatedTokens = Math.ceil(binaryData.length / 4);
 

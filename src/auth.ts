@@ -3,8 +3,11 @@
 import type { Env, RequestContext, ApiKeyRecord } from './types';
 import { AuthError } from './types';
 import { sha256 } from './utils/hash';
-// Bearer sk_<48 lowercase hex chars>
+
+// API key format: Bearer sk_<48 lowercase hex chars>
+// 48 hex chars = 24 bytes of entropy (generated via crypto.getRandomValues in admin.ts)
 const TOKEN_REGEX = /^sk_[a-f0-9]{48}$/;
+
 export async function authenticate(request: Request, env: Env, requestId: string): Promise<RequestContext> {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
@@ -67,7 +70,13 @@ export async function authenticateAdmin(request: Request, env: Env): Promise<voi
   // Small fixed delay ensures the total response time is not correlated with
   // how quickly the comparison short-circuits on invalid input.
   await new Promise(resolve => setTimeout(resolve, 1));
-  if (key.length === 0 || expected.length === 0 || !crypto.subtle.timingSafeEqual(hashA, hashB)) {
+  
+  // Always perform the full comparison regardless of early exits to prevent
+  // timing side-channels from different execution paths.
+  const isValidLength = key.length > 0 && expected.length > 0;
+  const isValidHash = crypto.subtle.timingSafeEqual(hashA, hashB);
+  
+  if (!isValidLength || !isValidHash) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
   }
 }

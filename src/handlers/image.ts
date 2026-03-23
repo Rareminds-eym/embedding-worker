@@ -8,6 +8,8 @@ import type { GeminiPart } from '../providers';
 import {
   MAX_IMAGE_BATCH_SIZE,
   MAX_IMAGE_REQUEST_BODY_SIZE,
+  MAX_IMAGE_FETCH_TIMEOUT_MS,
+  MAX_IMAGE_FETCH_SIZE,
   ALLOWED_IMAGE_MEDIA_TYPES,
   ERROR_CODES,
 } from '../constants';
@@ -82,11 +84,9 @@ function normalizeInput(input: unknown): ImageInput[] {
 
 /** Fetch a URL and return { base64, mimeType }. Enforces Gemini-supported types. */
 async function fetchImageAsBase64(url: string, tenantId: string): Promise<{ data: string; mediaType: AllowedMediaType }> {
-  const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB
-
   let res: Response;
   try {
-    res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    res = await fetch(url, { signal: AbortSignal.timeout(MAX_IMAGE_FETCH_TIMEOUT_MS) });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(JSON.stringify({ event: 'image_fetch.error', tenant_id: tenantId, url, error: msg }));
@@ -98,8 +98,8 @@ async function fetchImageAsBase64(url: string, tenantId: string): Promise<{ data
   }
 
   const contentLength = res.headers.get('Content-Length');
-  if (contentLength && parseInt(contentLength, 10) > MAX_IMAGE_SIZE) {
-    throw new ValidationError(`Image exceeds maximum size of ${MAX_IMAGE_SIZE} bytes`, ERROR_CODES.INVALID_INPUT);
+  if (contentLength && parseInt(contentLength, 10) > MAX_IMAGE_FETCH_SIZE) {
+    throw new ValidationError(`Image exceeds maximum size of ${MAX_IMAGE_FETCH_SIZE} bytes`, ERROR_CODES.INVALID_INPUT);
   }
 
   const contentType = res.headers.get('Content-Type')?.split(';')[0].trim().toLowerCase() ?? '';
@@ -114,8 +114,8 @@ async function fetchImageAsBase64(url: string, tenantId: string): Promise<{ data
   }
 
   const buffer = await res.arrayBuffer();
-  if (buffer.byteLength > MAX_IMAGE_SIZE) {
-    throw new ValidationError(`Image exceeds maximum size of ${MAX_IMAGE_SIZE} bytes`, ERROR_CODES.INVALID_INPUT);
+  if (buffer.byteLength > MAX_IMAGE_FETCH_SIZE) {
+    throw new ValidationError(`Image exceeds maximum size of ${MAX_IMAGE_FETCH_SIZE} bytes`, ERROR_CODES.INVALID_INPUT);
   }
 
   const bytes = new Uint8Array(buffer);

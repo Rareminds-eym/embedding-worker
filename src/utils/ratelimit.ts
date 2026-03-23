@@ -12,6 +12,10 @@ export async function checkRateLimit(
   const limit = RATE_LIMITS[endpoint];
   if (limit === undefined) return;
 
+  // Add jitter to reduce thundering herd and collision probability under concurrent load
+  const jitter = Math.floor(Math.random() * 100);
+  await new Promise(resolve => setTimeout(resolve, jitter));
+
   const window = Math.floor(Date.now() / 1000 / RATE_LIMIT_WINDOW_SECONDS);
   const key = `rl:${tenantId}:${endpoint}:${window}`;
 
