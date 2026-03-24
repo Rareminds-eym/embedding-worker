@@ -9,47 +9,18 @@ import {
   PROVIDER_TOTAL_DEADLINE_MS,
   PROVIDER_MIN_TIMEOUT_MS,
   PROVIDER_DEFAULT_RETRY_MS,
-  GEMINI_CHARS_PER_TOKEN,
 } from './constants';
 
-// ============================================================================
-// PROVIDER CONFIGURATION — change only this file to swap providers
-// ============================================================================
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_MODEL = 'gemini-embedding-2-preview';
+const GEMINI_AUTH_HEADER = 'x-goog-api-key';
+export const GEMINI_TIMEOUT_MS = 30_000;
+const GEMINI_OUTPUT_DIM = 3072;
+const GEMINI_ERROR_PREVIEW = 200;
 
-export interface ModelConfig {
-  id: string;
-  dimensions: number;
-  costPer1M: number;
-}
+export const GEMINI_MODEL_ID = GEMINI_MODEL;
+export const GEMINI_DIMENSIONS = GEMINI_OUTPUT_DIM;
 
-export interface GeminiConfig {
-  name: string;
-  baseUrl: string;
-  /** REST endpoint for single embedContent */
-  embedEndpoint: (model: string) => string;
-  /** REST endpoint for batchEmbedContents */
-  batchEmbedEndpoint: (model: string) => string;
-  /** Model used for text, image, and PDF embeddings */
-  model: ModelConfig;
-  /** Task type sent for text/document retrieval */
-  textTaskType: string;
-  /** Output dimensionality (3072 = default, normalized; 1536/768 require client-side L2 norm) */
-  outputDimensionality: number;
-  /** Max images per single embedContent call */
-  maxImagesPerRequest: number;
-  /** Max PDF pages per single embedContent call */
-  maxPdfPagesPerRequest: number;
-  /** Request timeout in ms */
-  timeoutMs: number;
-  /** Auth header name for API key */
-  authHeader: string;
-}
-
-// All task types supported by gemini-embedding-2-preview.
-// RETRIEVAL_DOCUMENT → content being indexed (stored in vector DB)
-// RETRIEVAL_QUERY    → search query being issued against indexed content
-// SEMANTIC_SIMILARITY, CLASSIFICATION, CLUSTERING, QUESTION_ANSWERING,
-// FACT_VERIFICATION, CODE_RETRIEVAL_QUERY — see Gemini docs for details.
 export const GEMINI_TASK_TYPES = [
   'RETRIEVAL_DOCUMENT',
   'RETRIEVAL_QUERY',
@@ -63,55 +34,15 @@ export const GEMINI_TASK_TYPES = [
 
 export type GeminiTaskType = typeof GEMINI_TASK_TYPES[number];
 
-const GEMINI_AUTH_HEADER = 'x-goog-api-key' as const;
-
-export const GEMINI: GeminiConfig = {
-  name: 'gemini',
-  baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-  embedEndpoint: (model) =>
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent`,
-  batchEmbedEndpoint: (model) =>
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents`,
-  model: {
-    id: 'gemini-embedding-2-preview',
-    dimensions: 3072,
-    costPer1M: 0.00,   // preview pricing — update when GA
-  },
-  // Default for document indexing. Use RETRIEVAL_QUERY when embedding search queries.
-  textTaskType: 'RETRIEVAL_DOCUMENT',
-  outputDimensionality: 3072,
-  maxImagesPerRequest: 6,
-  maxPdfPagesPerRequest: 6,
-  timeoutMs: 30_000,
-  authHeader: GEMINI_AUTH_HEADER,
-};
-
-// ============================================================================
-// Shared response shapes
-// ============================================================================
+export const GEMINI_DEFAULT_TASK_TYPE: GeminiTaskType = 'RETRIEVAL_DOCUMENT';
 
 export interface TextProviderResponse {
-  data: { embedding: number[] }[];
-  usage: { total_tokens: number };
-  _model: string;
-  _provider: string;
+  embedding: number[];
 }
 
 export interface DocProviderResponse {
   embeddings: { index: number; embedding: number[] }[];
-  total_tokens: number;
-  _model: string;
-  _provider: string;
 }
-
-export interface ImageProviderResponse {
-  data: { embedding: number[]; index: number }[];
-  usage: { total_tokens: number };
-}
-
-// ============================================================================
-// Gemini REST types
-// ============================================================================
 
 interface GeminiPart {
   text?: string;
@@ -136,10 +67,6 @@ interface GeminiBatchResponse {
   embeddings: Array<{ values: number[] }>;
 }
 
-// ============================================================================
-// Runtime response validators — avoid unsafe `as` casts on external API data
-// ============================================================================
-
 function isGeminiEmbedResponse(json: unknown): json is GeminiEmbedResponse {
   if (!json || typeof json !== 'object') return false;
   const j = json as Record<string, unknown>;
@@ -154,25 +81,16 @@ function isGeminiBatchResponse(json: unknown, expectedCount: number): json is Ge
   return Array.isArray(j.embeddings) && j.embeddings.length === expectedCount;
 }
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-const ERROR_PREVIEW_MAX_CHARS = 200;
-
-// ============================================================================
-// Retry-aware fetch
-// ============================================================================
-
 interface RetryContext {
   endpoint: string;
   tenantId: string;
-  model: string;
 }
 
 async function callWithRetry<T>(
   url: string,
-  apiKey: string,
+  // Accept a pre-built Headers object so the API key is never stored in any
+  // plain object that could be accidentally serialized into logs.
+  headers: Headers,
   body: object,
   validate: (json: unknown) => T,
   ctx: RetryContext,
@@ -182,110 +100,57 @@ async function callWithRetry<T>(
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
-      throw new ProviderError(`${ctx.endpoint} provider timeout (deadline exceeded)`, 502);
+      throw new ProviderError(`${ctx.endpoint} timeout (deadline exceeded)`, 502);
     }
     if (remainingMs < PROVIDER_MIN_TIMEOUT_MS) {
-      throw new ProviderError(
-        `${ctx.endpoint} provider timeout (insufficient time remaining: ${remainingMs}ms)`,
-        502,
-      );
+      throw new ProviderError(`${ctx.endpoint} timeout (${remainingMs}ms remaining)`, 502);
     }
 
     let res: Response;
     try {
-      const requestTimeoutMs = Math.max(PROVIDER_MIN_TIMEOUT_MS, Math.min(GEMINI.timeoutMs, remainingMs));
       res = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          [GEMINI.authHeader]: apiKey,
-        },
+        headers: new Headers(headers),
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(requestTimeoutMs),
+        signal: AbortSignal.timeout(Math.max(PROVIDER_MIN_TIMEOUT_MS, Math.min(GEMINI_TIMEOUT_MS, remainingMs))),
       });
     } catch (err) {
-      console.error(JSON.stringify({
-        event: 'provider.request_failed',
-        provider: GEMINI.name,
-        endpoint: ctx.endpoint,
-        tenant_id: ctx.tenantId,
-        model: ctx.model,
-        attempt: attempt + 1,
-        error: err instanceof Error ? err.message : String(err),
-      }));
+      console.error(JSON.stringify({ event: 'provider.request_failed', endpoint: ctx.endpoint, tenant_id: ctx.tenantId, attempt: attempt + 1, error: err instanceof Error ? err.message : String(err) }));
       if (attempt < MAX_RETRIES) {
-        const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
-        const wouldExceedDeadline = Date.now() + delay > deadline;
-        if (wouldExceedDeadline) throw new ProviderError(`${ctx.endpoint} provider timeout after ${attempt + 1} attempts`, 502);
+        const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt), 30_000);
+        if (Date.now() + delay > deadline) throw new ProviderError(`${ctx.endpoint} timeout after ${attempt + 1} attempts`, 502);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
-      throw new ProviderError(
-        `${ctx.endpoint} provider unreachable: ${err instanceof Error ? err.message : String(err)}`,
-        502,
-      );
+      throw new ProviderError(`${ctx.endpoint} unreachable: ${err instanceof Error ? err.message : String(err)}`, 502);
     }
 
     if (res.status === 429) {
-      const retryAfterHeader = res.headers.get('Retry-After');
-      const retryAfterSeconds = (() => {
-        if (!retryAfterHeader) return undefined;
-        const seconds = Number(retryAfterHeader);
-        if (Number.isFinite(seconds) && seconds > 0) return seconds;
-        // HTTP-date format (e.g. "Wed, 21 Oct 2015 07:28:00 GMT")
-        const retryAt = Date.parse(retryAfterHeader);
-        if (!Number.isNaN(retryAt)) {
-          const delta = Math.ceil((retryAt - Date.now()) / 1000);
-          return delta > 0 ? delta : undefined;
-        }
-        return undefined;
-      })();
+      const retryAfterSeconds = parseRetryAfter(res.headers.get('Retry-After'));
       if (attempt < MAX_RETRIES) {
-        const retryMs = retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-          ? retryAfterSeconds * 1000
-          : PROVIDER_DEFAULT_RETRY_MS;
-        if (Date.now() + retryMs > deadline) {
-          throw new RateLimitError('Rate limit exceeded. Please wait before retrying.', retryAfterSeconds);
-        }
+        const retryMs = retryAfterSeconds ? retryAfterSeconds * 1000 : PROVIDER_DEFAULT_RETRY_MS;
+        if (Date.now() + retryMs > deadline) throw new RateLimitError('Rate limit exceeded. Please wait before retrying.', retryAfterSeconds);
         await new Promise(r => setTimeout(r, retryMs));
         continue;
       }
-      console.error(JSON.stringify({ event: 'provider.rate_limit', provider: GEMINI.name, endpoint: ctx.endpoint, tenant_id: ctx.tenantId, model: ctx.model }));
+      console.error(JSON.stringify({ event: 'provider.rate_limit', endpoint: ctx.endpoint, tenant_id: ctx.tenantId }));
       throw new RateLimitError(
-        `Rate limit exceeded. ${retryAfterSeconds !== undefined && Number.isFinite(retryAfterSeconds) ? `Retry after ${retryAfterSeconds}s.` : 'Please wait before retrying.'}`,
+        retryAfterSeconds ? `Rate limit exceeded. Retry after ${retryAfterSeconds}s.` : 'Rate limit exceeded. Please wait before retrying.',
         retryAfterSeconds,
       );
     }
 
     if (res.status >= 500 && attempt < MAX_RETRIES) {
-      const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
-      if (Date.now() + delay > deadline) throw new ProviderError(`${ctx.endpoint} provider error (${res.status})`, res.status);
+      const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt), 30_000);
+      if (Date.now() + delay > deadline) throw new ProviderError(`${ctx.endpoint} error (${res.status})`, res.status);
       await new Promise(r => setTimeout(r, delay));
       continue;
     }
 
     if (!res.ok) {
-      const errorBody = await res.text().catch((err) => {
-        console.error(JSON.stringify({
-          event: 'response_body_read_failed',
-          provider: GEMINI.name,
-          endpoint: ctx.endpoint,
-          tenant_id: ctx.tenantId,
-          error: err instanceof Error ? err.message : String(err),
-        }));
-        return '';
-      });
-      console.error(JSON.stringify({
-        event: 'provider.error',
-        provider: GEMINI.name,
-        endpoint: ctx.endpoint,
-        status: res.status,
-        tenant_id: ctx.tenantId,
-        model: ctx.model,
-        response_bytes: errorBody.length,
-        response_preview: errorBody.slice(0, ERROR_PREVIEW_MAX_CHARS),
-      }));
-      throw new ProviderError(`${GEMINI.name} ${ctx.endpoint} provider error (${res.status})`, res.status);
+      const body = await res.text().catch(() => '');
+      console.error(JSON.stringify({ event: 'provider.error', endpoint: ctx.endpoint, status: res.status, tenant_id: ctx.tenantId, response_preview: body.slice(0, GEMINI_ERROR_PREVIEW) }));
+      throw new ProviderError(`${ctx.endpoint} error (${res.status})`, res.status);
     }
 
     try {
@@ -293,261 +158,151 @@ async function callWithRetry<T>(
       return validate(json);
     } catch (err) {
       if (err instanceof ProviderError || err instanceof RateLimitError) throw err;
-      if (err instanceof SyntaxError || err instanceof TypeError ||
-          (err && typeof err === 'object' && 'name' in err &&
-           (err.name === 'SyntaxError' || err.name === 'TypeError'))) {
-        throw new ProviderError(`${ctx.endpoint} provider returned invalid JSON`, 502);
+      if (err instanceof SyntaxError || err instanceof TypeError) {
+        throw new ProviderError(`${ctx.endpoint} returned invalid JSON`, 502);
       }
-      console.error(JSON.stringify({ event: 'provider.invalid_response', provider: GEMINI.name, endpoint: ctx.endpoint, tenant_id: ctx.tenantId, model: ctx.model, error: err instanceof Error ? err.message : String(err) }));
-      throw new ProviderError(`${ctx.endpoint} provider returned an invalid response`, 502);
+      console.error(JSON.stringify({ event: 'provider.invalid_response', endpoint: ctx.endpoint, tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+      throw new ProviderError(`${ctx.endpoint} returned an invalid response`, 502);
     }
   }
-  throw new ProviderError(`${ctx.endpoint} provider unreachable`, 502);
+
+  throw new ProviderError(`${ctx.endpoint} unreachable`, 502);
 }
 
-// ============================================================================
-// Single embedContent call — used for image and PDF (one item per call)
-// ============================================================================
+function parseRetryAfter(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds > 0 && seconds <= 3600) return seconds;
+  const retryAt = Date.parse(header);
+  if (!Number.isNaN(retryAt)) {
+    const delta = Math.ceil((retryAt - Date.now()) / 1000);
+    return (delta > 0 && delta <= 3600) ? delta : undefined;
+  }
+  return undefined;
+}
+
+function embedEndpoint(): string {
+  return `${GEMINI_API_BASE}/${GEMINI_MODEL}:embedContent`;
+}
+
+function batchEmbedEndpoint(): string {
+  return `${GEMINI_API_BASE}/${GEMINI_MODEL}:batchEmbedContents`;
+}
 
 async function callEmbedContent(
   parts: GeminiPart[],
   apiKey: string,
   tenantId: string,
-  endpointLabel: string,
+  endpoint: string,
   taskType?: string,
 ): Promise<number[]> {
-  const body: GeminiEmbedRequest = {
-    content: { parts },
-    output_dimensionality: GEMINI.outputDimensionality,
-  };
+  const body: GeminiEmbedRequest = { content: { parts }, output_dimensionality: GEMINI_OUTPUT_DIM };
   if (taskType) body.taskType = taskType;
 
+  const headers = new Headers({ 'Content-Type': 'application/json', [GEMINI_AUTH_HEADER]: apiKey });
+
   return callWithRetry(
-    GEMINI.embedEndpoint(GEMINI.model.id),
-    apiKey,
+    embedEndpoint(),
+    headers,
     body,
     (json) => {
-      if (!isGeminiEmbedResponse(json)) {
-        throw new ProviderError(`${GEMINI.name} ${endpointLabel} provider returned invalid response`, 502);
-      }
+      if (!isGeminiEmbedResponse(json)) throw new ProviderError(`${endpoint} returned invalid response`, 502);
       return json.embedding.values;
     },
-    { endpoint: endpointLabel, tenantId, model: GEMINI.model.id },
+    { endpoint, tenantId },
   );
 }
-
-// ============================================================================
-// batchEmbedContents — used for text chunks (multiple strings in one call)
-// ============================================================================
 
 async function callBatchEmbedContents(
   texts: string[],
   apiKey: string,
   tenantId: string,
   taskType: string,
+  batchOffset = 0,
 ): Promise<number[][]> {
+  if (texts.length === 0) throw new ProviderError('batch: empty input', 400);
+  if (texts.length > 100) throw new ProviderError(`batch: size ${texts.length} exceeds maximum of 100`, 400);
+
   const body: GeminiBatchRequest = {
     requests: texts.map(text => ({
-      model: `models/${GEMINI.model.id}`,
+      model: `models/${GEMINI_MODEL}`,
       content: { parts: [{ text }] },
       taskType,
-      output_dimensionality: GEMINI.outputDimensionality,
+      output_dimensionality: GEMINI_OUTPUT_DIM,
     })),
   };
 
+  const endpointLabel = `batch[${batchOffset}-${batchOffset + texts.length - 1}]`;
+
+  const headers = new Headers({ 'Content-Type': 'application/json', [GEMINI_AUTH_HEADER]: apiKey });
+
   return callWithRetry(
-    GEMINI.batchEmbedEndpoint(GEMINI.model.id),
-    apiKey,
+    batchEmbedEndpoint(),
+    headers,
     body,
     (json) => {
       if (!isGeminiBatchResponse(json, texts.length)) {
-        throw new ProviderError(`${GEMINI.name} batch-text provider returned invalid response`, 502);
+        const actual = Array.isArray((json as Record<string, unknown>)?.embeddings)
+          ? ((json as Record<string, unknown>).embeddings as unknown[]).length
+          : 'unknown';
+        throw new ProviderError(`${endpointLabel} returned ${actual} embeddings, expected ${texts.length}`, 502);
       }
       return json.embeddings.map((e, i) => {
         if (!e?.values || !Array.isArray(e.values) || e.values.length === 0) {
-          throw new ProviderError(`${GEMINI.name} batch-text missing embedding at index ${i}`, 502);
+          throw new ProviderError(`${endpointLabel} missing embedding at chunk index ${batchOffset + i}`, 502);
         }
         return e.values;
       });
     },
-    { endpoint: 'batch-text', tenantId, model: GEMINI.model.id },
+    { endpoint: endpointLabel, tenantId },
   );
 }
 
-// ============================================================================
-// Public provider functions
-// ============================================================================
-
-/**
- * Embed one or more text strings using Gemini's batchEmbedContents API.
- * @param inputs - Array of text strings to embed
- * @param apiKey - Gemini API key
- * @param tenantId - Tenant identifier for logging and error tracking
- * @param taskType - Gemini task type (defaults to RETRIEVAL_DOCUMENT)
- * @returns Promise resolving to text embeddings with usage metadata
- */
 export async function callTextProvider(
-  inputs: string[],
+  input: string,
   apiKey: string,
   tenantId: string,
-  taskType: string = GEMINI.textTaskType,
+  taskType: string = GEMINI_DEFAULT_TASK_TYPE,
 ): Promise<TextProviderResponse> {
-  const embeddings = await callBatchEmbedContents(inputs, apiKey, tenantId, taskType);
-  const estimatedTokens = inputs.reduce((sum, text) => sum + Math.max(1, Math.ceil(text.length / GEMINI_CHARS_PER_TOKEN)), 0);
-  return {
-    data: embeddings.map(embedding => ({ embedding })),
-    usage: { total_tokens: estimatedTokens },
-    _model: GEMINI.model.id,
-    _provider: GEMINI.name,
-  };
+  const embedding = await callEmbedContent([{ text: input }], apiKey, tenantId, 'text', taskType);
+  return { embedding };
 }
 
-/**
- * Embed a single image using Gemini's embedContent API.
- * @param parts - Gemini parts array (typically one inline_data element)
- * @param apiKey - Gemini API key
- * @param tenantId - Tenant identifier for logging and error tracking
- * @returns Promise resolving to image embedding with usage metadata
- */
 export async function callImageProvider(
-  parts: GeminiPart[],
+  image: { mime_type: string; data: string },
   apiKey: string,
   tenantId: string,
-): Promise<ImageProviderResponse> {
-  // Each image is a separate embedContent call; Gemini returns one embedding per call.
-  // For batch image requests the caller passes one part[] per image.
-  const embedding = await callEmbedContent(parts, apiKey, tenantId, 'image');
-  return {
-    data: [{ embedding, index: 0 }],
-    usage: { total_tokens: 0 },
-  };
+): Promise<number[]> {
+  return callEmbedContent([{ inline_data: image }], apiKey, tenantId, 'image');
 }
 
-/**
- * Embed a batch of images (one embedContent call per image, concurrently).
- * Uses Promise.allSettled to ensure one failing image doesn't kill the entire batch.
- * @param itemParts - Array of Gemini parts arrays (one per image)
- * @param apiKey - Gemini API key
- * @param tenantId - Tenant identifier for logging and error tracking
- * @returns Promise resolving to batch image embeddings with usage metadata
- * @throws ProviderError if any image in the batch fails to embed
- */
-export async function callImageBatchProvider(
-  itemParts: GeminiPart[][],
-  apiKey: string,
-  tenantId: string,
-): Promise<ImageProviderResponse> {
-  const results: { embedding: number[]; index: number }[] = [];
-  for (let offset = 0; offset < itemParts.length; offset += GEMINI.maxImagesPerRequest) {
-    const window = itemParts.slice(offset, offset + GEMINI.maxImagesPerRequest);
-    const settled = await Promise.allSettled(
-      window.map((parts, i) =>
-        callEmbedContent(parts, apiKey, tenantId, 'image').then(embedding => ({ embedding, index: offset + i }))
-      )
-    );
-    const failed: number[] = [];
-    for (const result of settled) {
-      if (result.status === 'fulfilled') {
-        results.push(result.value);
-      } else {
-        // Collect which absolute indexes failed for a meaningful error message
-        const idx = offset + settled.indexOf(result);
-        failed.push(idx);
-        console.error(JSON.stringify({
-          event: 'image_batch.item_failed',
-          tenant_id: tenantId,
-          index: idx,
-          error: result.reason instanceof Error ? result.reason.message : String(result.reason),
-        }));
-      }
-    }
-    if (failed.length > 0) {
-      throw new ProviderError(
-        `Image embedding failed for ${failed.length} of ${window.length} items in batch (indexes: ${failed.join(', ')})`,
-        502,
-      );
-    }
-  }
-  return {
-    data: results,
-    usage: { total_tokens: 0 },
-  };
-}
-
-/**
- * Embed a PDF document directly using Gemini's native multimodal embedContent API.
- * Gemini processes the visual and text content of each page natively (max 6 pages).
- * @param pdfBase64 - Base64-encoded PDF data
- * @param apiKey - Gemini API key
- * @param tenantId - Tenant identifier for logging and error tracking
- * @returns Promise resolving to a single embedding vector for the entire PDF
- */
 export async function callPdfProvider(
   pdfBase64: string,
   apiKey: string,
   tenantId: string,
 ): Promise<number[]> {
-  return callEmbedContent(
-    [{ inline_data: { mime_type: 'application/pdf', data: pdfBase64 } }],
-    apiKey,
-    tenantId,
-    'pdf',
-  );
+  return callEmbedContent([{ inline_data: { mime_type: 'application/pdf', data: pdfBase64 } }], apiKey, tenantId, 'pdf');
 }
 
-/**
- * Embed document text chunks via batchEmbedContents with concurrency control.
- * Processes chunks in batches of DOC_BATCH_SIZE with MAX_DOC_BATCH_CONCURRENCY
- * concurrent batch requests. Results are written directly into pre-allocated slots.
- * @param chunks - Array of text chunks to embed
- * @param apiKey - Gemini API key
- * @param tenantId - Tenant identifier for logging and error tracking
- * @returns Promise resolving to document embeddings with metadata
- * @throws ProviderError if any batch fails to process
- */
 export async function callDocProvider(
   chunks: string[],
   apiKey: string,
   tenantId: string,
 ): Promise<DocProviderResponse> {
-  // Pre-allocate with sentinel values so TypeScript and runtime both see a dense array.
-  // Slots are overwritten by each batch; any unfilled slot indicates a logic error.
   const result: DocProviderResponse = {
     embeddings: Array.from({ length: chunks.length }, (_, i) => ({ index: i, embedding: [] as number[] })),
-    total_tokens: 0,
-    _model: GEMINI.model.id,
-    _provider: GEMINI.name,
   };
 
   const batchStarts: number[] = [];
   for (let i = 0; i < chunks.length; i += DOC_BATCH_SIZE) batchStarts.push(i);
 
-  // Process in concurrency-limited windows; write directly into pre-allocated slots.
   for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
-    const window = batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY);
-    await Promise.all(window.map(async (i) => {
+    await Promise.all(batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY).map(async (i) => {
       const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-      let embeddings: number[][];
-      try {
-        embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI.textTaskType);
-      } catch (err) {
-        console.error(JSON.stringify({
-          event: 'doc_batch.failed',
-          tenant_id: tenantId,
-          batch_start: i,
-          batch_size: batch.length,
-          error: err instanceof Error ? err.message : String(err),
-        }));
-        throw err;
-      }
-      embeddings.forEach((embedding, j) => {
-        result.embeddings[i + j] = { index: i + j, embedding };
-      });
+      const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI_DEFAULT_TASK_TYPE, i);
+      embeddings.forEach((embedding, j) => { result.embeddings[i + j] = { index: i + j, embedding }; });
     }));
   }
 
   return result;
 }
-
-// Re-export GeminiPart so handlers can use it without importing from providers internals
-export type { GeminiPart };

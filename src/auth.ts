@@ -4,8 +4,6 @@ import type { Env, RequestContext, ApiKeyRecord } from './types';
 import { AuthError } from './types';
 import { sha256 } from './utils/hash';
 
-// API key format: Bearer sk_<48 lowercase hex chars>
-// 48 hex chars = 24 bytes of entropy (generated via crypto.getRandomValues in admin.ts)
 const TOKEN_REGEX = /^sk_[a-f0-9]{48}$/;
 
 export async function authenticate(request: Request, env: Env, requestId: string): Promise<RequestContext> {
@@ -37,13 +35,20 @@ export async function authenticate(request: Request, env: Env, requestId: string
     }
     keyRecord = parsed as ApiKeyRecord;
   } catch {
-    console.error(JSON.stringify({ event: 'auth.corrupt_key_record', hash }));
+    console.error(JSON.stringify({ event: 'auth.corrupt_key_record', timestamp: Date.now() }));
     throw new AuthError('Invalid API key', 'UNAUTHORIZED');
   }
 
-  const tenantExists = await env.EMBEDDING_KV.get(`tenant:${keyRecord.tenant_id}`);
-  if (!tenantExists) {
+  const [tenantRaw, deletionPending] = await Promise.all([
+    env.EMBEDDING_KV.get(`tenant:${keyRecord.tenant_id}`),
+    env.EMBEDDING_KV.get(`delete:tenant:${keyRecord.tenant_id}`),
+  ]);
+
+  if (!tenantRaw) {
     throw new AuthError('Tenant not found', 'UNAUTHORIZED');
+  }
+  if (deletionPending) {
+    throw new AuthError('Tenant is being deleted', 'UNAUTHORIZED');
   }
 
   return {
@@ -56,27 +61,18 @@ export async function authenticate(request: Request, env: Env, requestId: string
 export async function authenticateAdmin(request: Request, env: Env): Promise<void> {
   const key = request.headers.get('X-Admin-Key') ?? '';
   const expected = env.ADMIN_KEY ?? '';
+  
+  if (!key || !expected) {
+    throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
+  }
+
   const enc = new TextEncoder();
-  // Pad both values to a fixed length before hashing so the hash operation
-  // takes the same time regardless of the actual key length, preventing
-  // timing-based enumeration of key length.
-  const normalizeKey = (k: string) => k.padEnd(64, '\0').slice(0, 64);
-  const normalizedKey = normalizeKey(key);
-  const normalizedExpected = normalizeKey(expected);
   const [hashA, hashB] = await Promise.all([
-    crypto.subtle.digest('SHA-256', enc.encode(normalizedKey)),
-    crypto.subtle.digest('SHA-256', enc.encode(normalizedExpected)),
+    crypto.subtle.digest('SHA-256', enc.encode(key)),
+    crypto.subtle.digest('SHA-256', enc.encode(expected)),
   ]);
-  // Small fixed delay ensures the total response time is not correlated with
-  // how quickly the comparison short-circuits on invalid input.
-  await new Promise(resolve => setTimeout(resolve, 1));
   
-  // Always perform the full comparison regardless of early exits to prevent
-  // timing side-channels from different execution paths.
-  const isValidLength = key.length > 0 && expected.length > 0;
-  const isValidHash = crypto.subtle.timingSafeEqual(hashA, hashB);
-  
-  if (!isValidLength || !isValidHash) {
+  if (!crypto.subtle.timingSafeEqual(hashA, hashB)) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
   }
 }

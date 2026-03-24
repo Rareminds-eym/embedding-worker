@@ -25,12 +25,20 @@ binding    = "EMBEDDING_KV"
 id         = "REPLACE_WITH_LOCAL_KV_ID"      # local dev — replace with your actual local KV namespace ID
 preview_id = "REPLACE_WITH_LOCAL_KV_ID"      # used by wrangler dev; same as id for local
 
+# Native rate limiting — counters are cached per Cloudflare location and updated
+# asynchronously. namespace_id is a positive integer you choose. period must be 10 or 60.
+# The key passed at runtime is tenantId:endpoint.
+[[unsafe.bindings]]
+name         = "RATE_LIMITER"
+type         = "ratelimit"
+namespace_id = "1001"
+simple       = { limit = 120, period = 60 }
+
 # KV key schema:
 #   tenant:<id>                        → TenantConfig JSON
 #   api_keys:<sha256>                  → ApiKeyRecord JSON
-#   tenant_keys:<tenantId>:<sha256>    → "1" (reverse index for O(n) tenant key deletion)
-#   lock:tenant:<id>                   → "1" (TTL 60s, creation lock)
-#   rl:<tenantId>:<endpoint>:<window>  → request count (TTL 120s, rate limiting)
+#   tenant_keys:<tenantId>:<sha256>    → "1" (reverse index for tenant key deletion)
+#   delete:tenant:<id>                 → deletion-in-progress flag (TTL 300s)
 
 # wrangler secret put ADMIN_KEY
 # wrangler secret put GEMINI_API_KEY

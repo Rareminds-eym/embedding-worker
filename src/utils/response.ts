@@ -8,12 +8,29 @@ export function generateRequestId(): string {
   return crypto.randomUUID();
 }
 
-function getSecurityHeaders(): Record<string, string> {
-  return {
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
-    'X-XSS-Protection': '1; mode=block',
-  };
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+} as const;
+
+export function validateCorsOrigins(originsString: string): void {
+  for (const origin of originsString.split(',').map(o => o.trim())) {
+    if (origin === '*') {
+      throw new Error('Wildcard CORS origin not allowed');
+    }
+    let url: URL;
+    try {
+      url = new URL(origin);
+    } catch {
+      throw new Error(`Invalid CORS origin "${origin}": not a valid URL`);
+    }
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      throw new Error(`Invalid CORS origin "${origin}": unsupported protocol ${url.protocol}`);
+    }
+    if (url.protocol === 'http:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
+      throw new Error(`Non-HTTPS origin not permitted: ${origin}`);
+    }
+  }
 }
 
 export function getCorsHeaders(request: Request, env?: Env): Record<string, string> {
@@ -21,6 +38,7 @@ export function getCorsHeaders(request: Request, env?: Env): Record<string, stri
   const allowedOrigins = env?.ALLOWED_ORIGINS
     ? env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
     : [];
+  
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Admin-Key',
@@ -28,23 +46,32 @@ export function getCorsHeaders(request: Request, env?: Env): Record<string, stri
     'Cache-Control': 'no-store',
   };
   if (origin) {
-    // Only set Vary: Origin when the request actually has an Origin header.
-    // Setting it unconditionally causes CDN/proxy cache fragmentation on non-browser traffic.
     headers['Vary'] = 'Origin';
+    if (allowedOrigins.includes(origin)) {
+      headers['Access-Control-Allow-Origin'] = origin;
+    }
   }
-  if (allowedOrigins.includes(origin)) {
-    headers['Access-Control-Allow-Origin'] = origin;
+  return headers;
+}
+
+function buildHeaders(requestId: string, request?: Request, env?: Env): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Request-ID': requestId,
+    ...SECURITY_HEADERS,
+  };
+  if (request) {
+    Object.assign(headers, getCorsHeaders(request, env));
   }
   return headers;
 }
 
 export function jsonOk(data: unknown, status = 200, request?: Request, env?: Env, requestId?: string): Response {
-  const headers: Record<string, string> = {
+  const headers = requestId ? buildHeaders(requestId, request, env) : {
     'Content-Type': 'application/json',
-    ...getSecurityHeaders(),
+    ...SECURITY_HEADERS,
+    ...(request ? getCorsHeaders(request, env) : {}),
   };
-  if (request) Object.assign(headers, getCorsHeaders(request, env));
-  if (requestId) headers['X-Request-ID'] = requestId;
   return new Response(JSON.stringify(data), { status, headers });
 }
 
@@ -57,8 +84,7 @@ export function jsonError(
   extra?: Record<string, unknown>,
   env?: Env
 ): Response {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Request-ID': requestId, ...getSecurityHeaders() };
-  if (request) Object.assign(headers, getCorsHeaders(request, env));
+  const headers = buildHeaders(requestId, request, env);
   return new Response(
     JSON.stringify({ success: false, errorCode: code, message, request_id: requestId, ...extra }),
     { status, headers }
@@ -66,8 +92,7 @@ export function jsonError(
 }
 
 export function handleError(err: unknown, requestId: string, request?: Request, env?: Env): Response {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Request-ID': requestId, ...getSecurityHeaders() };
-  if (request) Object.assign(headers, getCorsHeaders(request, env));
+  const headers = buildHeaders(requestId, request, env);
 
   if (err instanceof AuthError) {
     return new Response(
@@ -82,19 +107,21 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
     );
   }
   if (err instanceof RateLimitError) {
-    const extra: Record<string, unknown> = {};
     if (err.retryAfterSeconds !== undefined) {
-      extra['retry_after_seconds'] = err.retryAfterSeconds;
       headers['Retry-After'] = String(err.retryAfterSeconds);
     }
     return new Response(
-      JSON.stringify({ success: false, errorCode: ERROR_CODES.RATE_LIMIT_EXCEEDED, message: err.message, request_id: requestId, ...extra }),
+      JSON.stringify({ 
+        success: false, 
+        errorCode: ERROR_CODES.RATE_LIMIT_EXCEEDED, 
+        message: err.message, 
+        request_id: requestId,
+        ...(err.retryAfterSeconds !== undefined && { retry_after_seconds: err.retryAfterSeconds })
+      }),
       { status: 429, headers }
     );
   }
   if (err instanceof ProviderError) {
-    // Always map to 502 for non-429 errors — forwarding upstream 4xx (e.g. 401, 403)
-    // would mislead clients into thinking their own credentials are invalid.
     const status = err.status === 429 ? 429 : 502;
     const errorCode = err.status === 429 ? ERROR_CODES.RATE_LIMIT_EXCEEDED : ERROR_CODES.PROVIDER_ERROR;
     if (err.status === 429) headers['Retry-After'] = '60';
@@ -120,8 +147,6 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
       timestamp: new Date().toISOString(),
     }));
   }
-  // Never expose internal error details to clients, even in non-production.
-  // Full error context is logged server-side above for debugging.
   return new Response(
     JSON.stringify({ success: false, errorCode: ERROR_CODES.INTERNAL_ERROR, message: 'Internal server error', request_id: requestId }),
     { status: 500, headers }

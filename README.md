@@ -1,55 +1,36 @@
 # Embedding Worker
 
-A multi-tenant embedding API built on Cloudflare Workers. Converts text, images, and documents into vector embeddings using Google's Gemini multimodal embedding model. Designed for the SkillPassports platform.
+Multi-tenant embedding API on Cloudflare Workers. Converts text, images, and documents into vector embeddings using Google Gemini.
 
 ---
 
 ## Architecture
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                        Client Request                           │
-│   POST /embeddings/text | /embeddings/image | /embeddings/doc   │
-│   Authorization: Bearer sk_<48hex>                              │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  embedding-worker (CF Worker)                    │
-│                                                                 │
-│  index.ts                                                       │
-│  ├── CORS preflight (OPTIONS → 204)                             │
-│  ├── Content-Length guard (per-route limits)                    │
-│  ├── GET  /health              → public                         │
-│  ├── ANY  /admin/*             → authenticateAdmin (X-Admin-Key)│
-│  │                                └── admin.ts                  │
-│  │                                    ├── POST   /admin/tenant  │
-│  │                                    ├── GET    /admin/tenant  │
-│  │                                    ├── GET    /admin/tenants │
-│  │                                    └── DELETE /admin/tenant  │
-│  └── POST /embeddings/*        → authenticate (Bearer token)   │
-│                                    ├── auth.ts                  │
-│                                    │   sha256(token) → KV       │
-│                                    │   → TenantConfig           │
-│                                    └── handlers/                │
-│                                        ├── text.ts              │
-│                                        ├── image.ts             │
-│                                        └── doc.ts               │
-└──────────┬───────────────────────────────┬──────────────────────┘
-           │                               │
-           ▼                               ▼
-┌──────────────────┐         ┌─────────────────────────────────────┐
-│  EMBEDDING_KV    │         │  providers.ts                       │
-│                  │         │                                     │
-│  tenant:<id>     │         │  Google Gemini API                  │
-│  api_keys:<hash> │         │  model: gemini-embedding-2-preview  │
-│  tenant_keys:... │         │                                     │
-│  rl:...          │         │  text  → batchEmbedContents         │
-└──────────────────┘         │  image → embedContent (per image)   │
-                             │  pdf   → embedContent (native)      │
-                             │  docx/xlsx → AI.toMarkdown          │
-                             │              → batchEmbedContents   │
-                             └─────────────────────────────────────┘
+Client Request
+  POST /embeddings/text | /embeddings/image | /embeddings/doc
+  Authorization: Bearer sk_<48hex>
+         │
+         ▼
+┌────────────────────────────────────────────────────────────┐
+│  embedding-worker (Cloudflare Worker)                      │
+│                                                            │
+│  index.ts                                                  │
+│  ├── OPTIONS → 204 (CORS preflight)                        │
+│  ├── GET /health → public                                  │
+│  ├── /admin/* → authenticateAdmin (X-Admin-Key)            │
+│  │   └── admin.ts (tenant CRUD)                            │
+│  └── /embeddings/* → authenticate (Bearer token)           │
+│      └── handlers/ (text.ts, image.ts, doc.ts)             │
+└────────┬───────────────────────────┬─────────────────────────┘
+         │                           │
+         ▼                           ▼
+  EMBEDDING_KV              Google Gemini API
+  tenant:<id>               gemini-embedding-2-preview
+  api_keys:<hash>           - text → embedContent
+  tenant_keys:...           - image → embedContent
+  rl:...                    - pdf → embedContent (native)
+                            - docx/xlsx → AI.toMarkdown → batchEmbedContents
 ```
 
 ---
@@ -59,9 +40,9 @@ A multi-tenant embedding API built on Cloudflare Workers. Converts text, images,
 | Layer | Technology |
 |---|---|
 | Runtime | Cloudflare Workers (TypeScript) |
-| KV Store | Cloudflare KV (`EMBEDDING_KV`) |
-| All Embeddings | Google Gemini — `gemini-embedding-2-preview` |
-| DOCX/XLSX → Markdown | Cloudflare Workers AI `toMarkdown` |
+| KV Store | Cloudflare KV |
+| Embeddings | Google Gemini `gemini-embedding-2-preview` |
+| Doc Conversion | Cloudflare Workers AI `toMarkdown` |
 | Local dev port | `9004` |
 
 ---
@@ -70,40 +51,21 @@ A multi-tenant embedding API built on Cloudflare Workers. Converts text, images,
 
 ```text
 src/
-├── index.ts           — entry point, router, CORS, per-route body size guard
-├── types.ts           — Env, interfaces, error classes
-├── constants.ts       — all limits, timeouts, rate limits, error codes
-├── providers.ts       — provider config, model config, HTTP callers with retry
-├── auth.ts            — Bearer token auth + admin key auth (timing-safe)
-├── admin.ts           — /admin/* route handlers
+├── index.ts           — router, CORS, body size guards
+├── types.ts           — interfaces, error classes
+├── constants.ts       — limits, timeouts, rate limits
+├── providers.ts       — Gemini API calls with retry logic
+├── auth.ts            — Bearer token + admin key auth
+├── admin.ts           — /admin/* handlers
 ├── handlers/
 │   ├── text.ts        — POST /embeddings/text
 │   ├── image.ts       — POST /embeddings/image
 │   └── doc.ts         — POST /embeddings/doc
 └── utils/
-    ├── hash.ts        — sha256 via Web Crypto API
-    ├── ratelimit.ts   — KV-based fixed window rate limiter (per-tenant)
-    └── response.ts    — jsonOk, jsonError, handleError, getCorsHeaders
+    ├── hash.ts        — sha256 via Web Crypto
+    ├── ratelimit.ts   — KV-based rate limiter
+    └── response.ts    — jsonOk, jsonError, CORS headers
 ```
-
----
-
-## Provider Design
-
-All provider HTTP logic lives exclusively in `providers.ts`. Handlers never touch endpoints, auth headers, or request shapes directly. To swap providers, only `providers.ts`, `types.ts` (API key name), and `wrangler.toml` need to change.
-
-```text
-handlers/text.ts  ──→  callTextProvider()        ──→  Gemini batchEmbedContents
-handlers/doc.ts   ──→  callDocProvider()         ──→  Gemini batchEmbedContents (batched chunks)
-                  ──→  callPdfProvider()         ──→  Gemini embedContent (native PDF)
-handlers/image.ts ──→  callImageBatchProvider()  ──→  Gemini embedContent (per image, concurrent)
-```
-
-**PDF path:** PDFs are sent directly to Gemini as `inline_data` with `application/pdf`. Gemini processes the visual and text content of each page natively — no text extraction step. Maximum 6 pages per call.
-
-**DOCX/XLSX path:** Converted to markdown via `env.AI.toMarkdown`, then chunked and embedded via `batchEmbedContents`.
-
-**Image path:** Gemini requires `inline_data` (no URL support). URL inputs are fetched by the worker, converted to base64, then sent to Gemini. Only `image/png` and `image/jpeg` are supported by the model.
 
 ---
 
@@ -111,12 +73,11 @@ handlers/image.ts ──→  callImageBatchProvider()  ──→  Gemini embedCo
 
 | Variable | Where | Description |
 |---|---|---|
-| `ADMIN_KEY` | Secret | Protects all `/admin/*` routes |
-| `GEMINI_API_KEY` | Secret | Google Gemini API key — required for all embedding endpoints |
+| `ADMIN_KEY` | Secret | Protects `/admin/*` routes (min 32 chars) |
+| `GEMINI_API_KEY` | Secret | Google Gemini API key |
 | `ALLOWED_ORIGINS` | `wrangler.toml` vars | Comma-separated CORS allowlist |
-| `ENVIRONMENT` | `wrangler.toml` vars | `local` / `dev` / `staging` / `production` |
 
-Secrets are set via `.dev.vars` locally and `wrangler secret put` for deployed environments.
+Secrets: `.dev.vars` locally, `wrangler secret put` for deployed environments.
 
 ---
 
@@ -125,29 +86,26 @@ Secrets are set via `.dev.vars` locally and `wrangler secret put` for deployed e
 Namespace: `EMBEDDING_KV`
 
 ```text
-tenant:<id>                        →  { name: string, created_at: string }
-api_keys:<sha256(token)>           →  { tenant_id: string, created_at: string }
-tenant_keys:<tenantId>:<sha256>    →  "1"   (reverse index — enables O(n_keys) tenant deletion)
-lock:tenant:<id>                   →  "1"   (TTL 60s — creation lock, best-effort)
-rl:<tenantId>:<endpoint>:<window>  →  count (TTL 120s — rate limit counter)
+tenant:<id>                        →  { name, created_at }
+api_keys:<sha256(token)>           →  { tenant_id, created_at }
+tenant_keys:<tenantId>:<sha256>    →  "1" (reverse index for deletion)
+rl:<tenantId>:<endpoint>:<window>  →  count (TTL 120s)
 ```
 
-- Raw API tokens are never stored — only their SHA-256 hash.
-- Deleting a tenant revokes all its API keys via the `tenant_keys:` reverse index.
-- Rate limit keys expire automatically — no cleanup needed on normal operation.
+Raw API tokens are never stored — only SHA-256 hashes.
 
 ---
 
 ## Auth Flow
 
-**Tenant auth (embedding routes):**
+**Tenant auth:**
 
 ```text
-Authorization: Bearer sk_<48 lowercase hex chars>
+Authorization: Bearer sk_<48hex>
   → validate format: /^sk_[a-f0-9]{48}$/
   → sha256(token)
-  → KV get api_keys:<hash>  → { tenant_id }
-  → KV get tenant:<id>      → TenantConfig (confirms tenant not deleted)
+  → KV get api_keys:<hash> → { tenant_id }
+  → KV get tenant:<id> → TenantConfig
   → RequestContext { tenantId, requestId, startTime }
 ```
 
@@ -155,16 +113,15 @@ Authorization: Bearer sk_<48 lowercase hex chars>
 
 ```text
 X-Admin-Key: <value>
-  → sha256(provided key) vs sha256(env.ADMIN_KEY)
+  → sha256(provided) vs sha256(env.ADMIN_KEY)
   → timing-safe comparison via crypto.subtle.timingSafeEqual
-  → rejects immediately if either side is empty
 ```
 
 ---
 
 ## Rate Limiting
 
-Rate limits are enforced per-tenant per-endpoint using a KV fixed window counter. The counter is incremented only after all input validation passes — malformed requests do not consume quota.
+Per-tenant per-endpoint, KV fixed window counter.
 
 | Endpoint | Limit |
 |---|---|
@@ -172,70 +129,65 @@ Rate limits are enforced per-tenant per-endpoint using a KV fixed window counter
 | `/embeddings/image` | 60 req/min |
 | `/embeddings/doc` | 30 req/min |
 
-**Important:** KV is eventually consistent — the counter is not atomic. Concurrent bursts can exceed limits by the degree of concurrency. This is a soft quota guard, not a hard security boundary. Use Durable Objects if strict enforcement is required.
-
-On limit exceeded, the response includes a `Retry-After` header and `retry_after_seconds` in the body.
+KV is eventually consistent — concurrent bursts can exceed limits. Use Durable Objects for strict enforcement.
 
 ---
 
 ## CORS
 
-Origins are configured per environment in `wrangler.toml` via `ALLOWED_ORIGINS`. Only listed origins are reflected — no wildcard fallback.
+Origins configured per environment in `wrangler.toml` via `ALLOWED_ORIGINS`.
 
 | Environment | Allowed Origins |
 |---|---|
-| local | `http://localhost:5173`, `http://localhost:8788`, `http://127.0.0.1:5173`, `http://127.0.0.1:8788` |
+| local | `http://localhost:5173`, `http://127.0.0.1:5173` |
 | dev | `https://dev.skillpassports.com` |
 | staging | `https://stag.skillpassports.com` |
 | production | `https://skillpassport.com`, `https://www.skillpassports.com` |
 
 ---
 
-## Limits & Constants
+## Limits
 
 ```typescript
 // Text
-TEXT_MAX_CHARS           = 120_000     // ~30K tokens
-MAX_REQUEST_BODY_SIZE    = 1_000_000   // 1MB
+TEXT_MAX_CHARS           = 120_000
+MAX_REQUEST_BODY_SIZE    = 1_000_000
 
 // Image
-MAX_IMAGE_BATCH_SIZE          = 5
-MAX_IMAGE_REQUEST_BODY_SIZE   = 20_000_000   // 20MB
-// Gemini only accepts image/jpeg and image/png — other types rejected at validation
+MAX_IMAGE_BATCH_SIZE          = 6
+MAX_IMAGE_REQUEST_BODY_SIZE   = 20_000_000
+// Only image/jpeg and image/png supported
 
 // Doc
-MAX_DOC_REQUEST_BODY_SIZE     = 10_000_000   // 10MB (JSON body)
-MAX_DOC_BINARY_SIZE           = 2_000_000    // 2MB decoded binary
-DOC_CHUNK_SIZE                = 8_000        // chars per chunk (DOCX/XLSX only)
-DOC_CHUNK_OVERLAP             = 400          // overlap between chunks
-DOC_MAX_CHUNKS                = 50           // max chunks per document
-DOC_MAX_PAGES                 = 100          // hard cap on max_pages param
-// PDF: max 6 pages per Gemini call (native multimodal path)
-// DOCX/XLSX: max processable chars = 50 * 2000 = 100_000
+MAX_DOC_REQUEST_BODY_SIZE     = 10_000_000
+MAX_DOC_BINARY_SIZE           = 2_000_000
+DOC_CHUNK_SIZE                = 8_000
+DOC_CHUNK_OVERLAP             = 400
+DOC_MAX_CHUNKS                = 50
+DOC_MAX_PAGES                 = 100
+// PDF: max 6 pages per Gemini call
 
 // Provider
 RETRY_DELAY_MS            = 1_000
-MAX_RETRIES               = 3     // retries on 5xx and 429 (with Retry-After delay)
-DOC_BATCH_SIZE            = 10    // chunks per Gemini batch call
-MAX_DOC_BATCH_CONCURRENCY = 4     // concurrent batch requests
+MAX_RETRIES               = 3
+DOC_BATCH_SIZE            = 10
+MAX_DOC_BATCH_CONCURRENCY = 4
 ```
 
 ---
 
 ## Model
 
-All endpoints use a single model: `gemini-embedding-2-preview`
+All endpoints use `gemini-embedding-2-preview`
 
 | Property | Value |
 |---|---|
 | Model | `gemini-embedding-2-preview` |
-| Dimensions | 3072 (default, normalized) |
-| Modalities | Text, image (PNG/JPEG), PDF, audio, video |
+| Dimensions | 3072 (normalized) |
+| Modalities | Text, image (PNG/JPEG), PDF |
 | Max text tokens | 8,192 |
 | Max images per call | 6 |
 | Max PDF pages per call | 6 |
-
-All modalities share the same vector space — text, image, and PDF embeddings are directly comparable via cosine similarity.
 
 ---
 
@@ -243,7 +195,7 @@ All modalities share the same vector space — text, image, and PDF embeddings a
 
 ### Text Endpoint
 
-The `input` field accepts a plain string, an object, or an array.
+Accepts string, object, or array.
 
 ```json
 { "input": "Software engineer with 5 years React experience" }
@@ -253,17 +205,22 @@ The `input` field accepts a plain string, an object, or an array.
 {
   "input": {
     "title": "Senior Backend Engineer",
-    "skills": ["Rust", "Go", "PostgreSQL"],
-    "location": "Berlin"
+    "skills": ["Rust", "Go", "PostgreSQL"]
   }
 }
 ```
 
-**Fields automatically skipped:** keys containing `id`, timestamp fields (`created_at`, `updatedAt`, etc.), `embedding`, boolean `false` values.
+```json
+{
+  "input": ["Python developer", { "skill": "FastAPI", "years": 3 }, "REST API design"]
+}
+```
+
+Arrays are joined into a single embedding.
 
 #### task_type (optional)
 
-Controls how Gemini optimizes the embedding. Defaults to `RETRIEVAL_DOCUMENT`.
+Defaults to `RETRIEVAL_DOCUMENT`.
 
 ```json
 { "input": "find me a frontend engineer", "task_type": "RETRIEVAL_QUERY" }
@@ -271,22 +228,20 @@ Controls how Gemini optimizes the embedding. Defaults to `RETRIEVAL_DOCUMENT`.
 
 | task_type | Use when |
 |---|---|
-| `RETRIEVAL_DOCUMENT` | Indexing content into a vector DB (default) |
-| `RETRIEVAL_QUERY` | Embedding a search query against indexed content |
-| `SEMANTIC_SIMILARITY` | Comparing two pieces of text |
+| `RETRIEVAL_DOCUMENT` | Indexing content (default) |
+| `RETRIEVAL_QUERY` | Embedding search queries |
+| `SEMANTIC_SIMILARITY` | Comparing text |
 | `CLASSIFICATION` | Categorizing text |
 | `CLUSTERING` | Grouping similar content |
-| `QUESTION_ANSWERING` | Embedding questions for QA retrieval |
-| `FACT_VERIFICATION` | Embedding statements for fact-checking |
-| `CODE_RETRIEVAL_QUERY` | Searching code with natural language |
-
-**Use matching task types.** Index with `RETRIEVAL_DOCUMENT`, query with `RETRIEVAL_QUERY`. Mixing them degrades retrieval quality.
+| `QUESTION_ANSWERING` | QA retrieval |
+| `FACT_VERIFICATION` | Fact-checking |
+| `CODE_RETRIEVAL_QUERY` | Code search |
 
 ---
 
 ### Image Endpoint
 
-Only `image/jpeg` and `image/png` are supported. Single image or batch up to 5.
+Only `image/jpeg` and `image/png` supported. Single or batch up to 6.
 
 ```json
 { "input": { "type": "url", "data": "https://example.com/photo.jpg" } }
@@ -296,7 +251,7 @@ Only `image/jpeg` and `image/png` are supported. Single image or batch up to 5.
 { "input": { "type": "base64", "mediaType": "image/jpeg", "data": "/9j/4AAQ..." } }
 ```
 
-URL inputs are fetched server-side (SSRF protection blocks private IPs). `data` is raw base64 — no `data:image/...;base64,` prefix.
+URL inputs are fetched server-side (SSRF protection blocks private IPs).
 
 ---
 
@@ -321,7 +276,7 @@ Documents must be base64-encoded.
 | Word | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
 | Excel | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
 
-PDFs return a single embedding (Gemini native path). DOCX/XLSX return one embedding per chunk.
+PDFs return a single embedding. DOCX/XLSX return one embedding per chunk.
 
 ---
 
@@ -330,23 +285,20 @@ PDFs return a single embedding (Gemini native path). DOCX/XLSX return one embedd
 ### GET /health
 
 ```json
-{ "status": "ok", "version": "1.0.0", "timestamp": "2026-03-17T08:00:00.000Z" }
+{ "status": "ok", "version": "1.0.0", "timestamp": "2026-03-24T08:00:00.000Z" }
 ```
 
 ---
 
 ### POST /embeddings/text
 
-Response:
-
 ```json
 {
   "success": true,
-  "embedding": [0.023, -0.041, 0.017],
+  "embedding": [0.023, -0.041, 0.017, ...],
   "model": "gemini-embedding-2-preview",
   "dimensions": 3072,
   "task_type": "RETRIEVAL_DOCUMENT",
-  "usage": { "estimated_cost_usd": 0 },
   "request_id": "a1b2c3d4-...",
   "latency_ms": 210
 }
@@ -356,41 +308,50 @@ Response:
 
 ### POST /embeddings/image
 
-Single response:
+Single:
 
 ```json
 {
   "success": true,
-  "embedding": [0.013, -0.057, 0.009],
-  "dimensions": 3072,
+  "embeddings": [{
+    "index": 0,
+    "embedding": [0.013, -0.057, ...],
+    "dimensions": 3072
+  }],
   "model": "gemini-embedding-2-preview",
-  "usage": { "estimated_cost_usd": 0 },
   "request_id": "a1b2c3d4-...",
   "latency_ms": 691
 }
 ```
 
-Batch response returns `embeddings: [{ index, embedding, dimensions }]` instead of `embedding`.
-
 ---
 
 ### POST /embeddings/doc
 
-PDF response:
+PDF:
 
 ```json
 {
   "success": true,
-  "embeddings": [{ "index": 0, "embedding": [...], "dimensions": 3072 }],
+  "embeddings": [{
+    "index": 0,
+    "embedding": [...],
+    "dimensions": 3072
+  }],
   "model": "gemini-embedding-2-preview",
-  "document": { "filename": "resume.pdf", "mimeType": "application/pdf", "type": "PDF", "chunks": 1 },
-  "usage": { "total_tokens": 4608, "estimated_cost_usd": 0 },
+  "document": {
+    "filename": "resume.pdf",
+    "mimeType": "application/pdf",
+    "type": "PDF",
+    "chunks": 1
+  },
+  "usage": { "estimated_tokens": 3072 },
   "request_id": "a1b2c3d4-...",
   "latency_ms": 1200
 }
 ```
 
-DOCX/XLSX response:
+DOCX/XLSX:
 
 ```json
 {
@@ -409,7 +370,7 @@ DOCX/XLSX response:
     "chunk_size": 8000,
     "chunk_overlap": 400
   },
-  "usage": { "total_tokens": 4632, "estimated_cost_usd": 0 },
+  "usage": { "estimated_tokens": 5295 },
   "request_id": "a1b2c3d4-...",
   "latency_ms": 3200
 }
@@ -423,14 +384,15 @@ DOCX/XLSX response:
 { "id": "skillpassport", "name": "Skill Passport" }
 ```
 
-Response `201` — `api_key` shown once only, never stored in plain text:
+Response `201`:
 
 ```json
 {
   "success": true,
   "tenant_id": "skillpassport",
   "api_key": "sk_2f84c0f8...",
-  "created_at": "2026-03-17T08:00:00.000Z"
+  "warning": "Save this API key now. It will not be shown again.",
+  "created_at": "2026-03-24T08:00:00.000Z"
 }
 ```
 
@@ -442,7 +404,7 @@ Response `201` — `api_key` shown once only, never stored in plain text:
 {
   "success": true,
   "tenant_id": "skillpassport",
-  "config": { "name": "Skill Passport", "created_at": "2026-03-17T08:00:00.000Z" }
+  "config": { "name": "Skill Passport", "created_at": "2026-03-24T08:00:00.000Z" }
 }
 ```
 
@@ -478,13 +440,13 @@ Response `201` — `api_key` shown once only, never stored in plain text:
 | errorCode | HTTP | Cause |
 |---|---|---|
 | `UNAUTHORIZED` | 401 | Missing/invalid Bearer token or admin key |
-| `INVALID_INPUT` | 400 | Validation failure — see `message` |
-| `RATE_LIMIT_EXCEEDED` | 429 | Per-tenant rate limit hit — check `Retry-After` header |
-| `PROVIDER_ERROR` | 502 | Gemini API returned an error after retries |
-| `INTERNAL_ERROR` | 500/503/504 | Server error, missing secret, or conversion timeout |
+| `INVALID_INPUT` | 400 | Validation failure |
+| `RATE_LIMIT_EXCEEDED` | 429 | Per-tenant rate limit hit |
+| `PROVIDER_ERROR` | 502 | Gemini API error after retries |
+| `INTERNAL_ERROR` | 500/503/504 | Server error, missing secret, or timeout |
 | `NOT_FOUND` | 404 | Route or resource not found |
 | `TENANT_EXISTS` | 409 | Tenant ID already taken |
-| `METHOD_NOT_ALLOWED` | 405 | Wrong HTTP method on admin route |
+| `METHOD_NOT_ALLOWED` | 405 | Wrong HTTP method |
 
 ---
 
@@ -492,15 +454,15 @@ Response `201` — `api_key` shown once only, never stored in plain text:
 
 ```bash
 npm install
-npm run kv:create:local   # replace REPLACE_WITH_LOCAL_KV_ID in wrangler.toml with returned ID
+npm run kv:create:local   # update wrangler.toml with returned ID
 ```
 
 `.dev.vars`:
 
 ```ini
-ADMIN_KEY=local-admin-key
+ADMIN_KEY=local-admin-key-32chars-minimum
 GEMINI_API_KEY=AIza...
-ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788
+ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
 
 ```bash
@@ -513,12 +475,12 @@ npm run test
 ## Deployment
 
 ```bash
-# Create KV namespaces and update wrangler.toml with returned IDs
+# Create KV namespaces
 npm run kv:create:dev
 npm run kv:create:staging
 npm run kv:create:production
 
-# Set secrets per environment
+# Set secrets
 wrangler secret put ADMIN_KEY      --env production
 wrangler secret put GEMINI_API_KEY --env production
 
@@ -532,9 +494,9 @@ npm run deploy:production
 
 All provider logic is in `providers.ts`. To switch:
 
-1. `providers.ts` — update endpoint URLs, model ID, dimensions, request/response shapes
-2. `types.ts` — rename `GEMINI_API_KEY` in the `Env` interface
-3. `wrangler.toml` — update secret name comments
+1. `providers.ts` — update endpoints, model ID, dimensions, request/response shapes
+2. `types.ts` — rename `GEMINI_API_KEY` in `Env` interface
+3. `wrangler.toml` — update secret name
 4. `wrangler secret put <NEW_KEY_NAME>`
 
-Note: the image handler fetches URLs server-side because Gemini requires `inline_data`. If the new provider accepts URLs directly, that fetch logic in `handlers/image.ts` can be removed. The PDF native path in `handlers/doc.ts` is also Gemini-specific — other providers would need the `AI.toMarkdown` → chunks path for PDFs.
+Note: Image handler fetches URLs server-side because Gemini requires `inline_data`. If the new provider accepts URLs directly, remove that fetch logic. PDF native path in `doc.ts` is Gemini-specific — other providers would need the `AI.toMarkdown` → chunks path for PDFs.

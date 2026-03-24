@@ -1,0 +1,4 @@
+ADMIN_KEY=replace-with-a-strong-random-key-min-32-chars
+GEMINI_API_KEY=replace-with-your-gemini-api-key
+ENVIRONMENT=local
+ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788
