@@ -22,6 +22,20 @@ export default {
 
     const contentLength = request.headers.get('Content-Length');
     const { pathname } = new URL(request.url);
+    const isJsonPostEndpoint = request.method === 'POST' && (
+      pathname === '/embeddings/text' ||
+      pathname === '/embeddings/image' ||
+      pathname === '/embeddings/doc' ||
+      pathname === '/admin/tenant'
+    );
+
+    if (isJsonPostEndpoint) {
+      const contentType = request.headers.get('Content-Type') ?? '';
+      if (!contentType.toLowerCase().includes('application/json')) {
+        return jsonError('Content-Type must be application/json', 415, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
+      }
+    }
+
     const routeLimit = pathname === '/embeddings/doc'
       ? MAX_DOC_REQUEST_BODY_SIZE
       : pathname === '/embeddings/image'

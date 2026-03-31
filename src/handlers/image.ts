@@ -12,6 +12,10 @@ import {
 } from '../constants';
 
 type AllowedMediaType = typeof ALLOWED_IMAGE_MEDIA_TYPES[number];
+const MAX_IMAGE_BASE64_CHARS = 12_000_000;
+const PRIVATE_HOST = /^(localhost|127\.|10\.\d+\.\d+\.\d+|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/;
+const PRIVATE_OR_LOCAL_IPV6 = /^(::1|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|fe80:)/i;
+const INTERNAL_HOST_SUFFIX = /(\.internal|\.local)$/i;
 
 interface ImageInputUrl { type: 'url'; data: string; }
 interface ImageInputBase64 { type: 'base64'; data: string; mediaType: AllowedMediaType; }
@@ -30,22 +34,29 @@ function normalizeInput(input: unknown): ImageInput[] {
     if (typeof obj.data !== 'string' || obj.data.trim().length === 0) {
       throw new ValidationError('input.data must be a non-empty string', ERROR_CODES.INVALID_INPUT);
     }
+    const data = obj.data.trim();
 
     if (obj.type === 'url') {
       try {
-        const parsed = new URL(obj.data as string);
+        const parsed = new URL(data);
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           throw new ValidationError('input.data URL must use http or https scheme', ERROR_CODES.INVALID_INPUT);
         }
-        const PRIVATE_HOST = /^(localhost|127\.|10\.\d+\.\d+\.\d+|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/;
-        if (PRIVATE_HOST.test(parsed.hostname)) {
+        if (parsed.username || parsed.password) {
+          throw new ValidationError('input.data URL must not include credentials', ERROR_CODES.INVALID_INPUT);
+        }
+        if (
+          PRIVATE_HOST.test(parsed.hostname) ||
+          INTERNAL_HOST_SUFFIX.test(parsed.hostname) ||
+          PRIVATE_OR_LOCAL_IPV6.test(parsed.hostname)
+        ) {
           throw new ValidationError('Private or internal URLs are not permitted', ERROR_CODES.INVALID_INPUT);
         }
       } catch (e) {
         if (e instanceof ValidationError) throw e;
         throw new ValidationError('input.data must be a valid URL', ERROR_CODES.INVALID_INPUT);
       }
-      return { type: 'url', data: obj.data as string };
+      return { type: 'url', data };
     }
 
     if (!obj.mediaType || !(ALLOWED_IMAGE_MEDIA_TYPES as readonly string[]).includes(obj.mediaType as string)) {
@@ -54,7 +65,14 @@ function normalizeInput(input: unknown): ImageInput[] {
         ERROR_CODES.INVALID_INPUT
       );
     }
-    return { type: 'base64', data: obj.data as string, mediaType: obj.mediaType as AllowedMediaType };
+    const normalizedBase64 = data.replace(/\s+/g, '');
+    if (normalizedBase64.length > MAX_IMAGE_BASE64_CHARS) {
+      throw new ValidationError('input.data base64 payload is too large', ERROR_CODES.INVALID_INPUT);
+    }
+    if (!/^[A-Za-z0-9+/=]+$/.test(normalizedBase64)) {
+      throw new ValidationError('input.data must be valid base64 characters only', ERROR_CODES.INVALID_INPUT);
+    }
+    return { type: 'base64', data: normalizedBase64, mediaType: obj.mediaType as AllowedMediaType };
   };
 
   if (Array.isArray(input)) {

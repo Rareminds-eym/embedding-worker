@@ -6,6 +6,15 @@ import { sha256 } from './utils/hash';
 // Bearer sk_<48 lowercase hex chars>
 const TOKEN_REGEX = /^sk_[a-f0-9]{48}$/;
 
+async function safeEqualSecret(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [aHash, bHash] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ]);
+  return crypto.subtle.timingSafeEqual(new Uint8Array(aHash), new Uint8Array(bHash));
+}
+
 export async function authenticate(request: Request, env: Env, requestId: string): Promise<RequestContext> {
   const authHeader = request.headers.get('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
@@ -41,11 +50,14 @@ export async function authenticate(request: Request, env: Env, requestId: string
 
 export async function authenticateAdmin(request: Request, env: Env): Promise<void> {
   const key = request.headers.get('X-Admin-Key') ?? '';
-  const enc = new TextEncoder();
-  const a = enc.encode(key.padEnd(64));
-  const b = enc.encode((env.ADMIN_KEY ?? '').padEnd(64));
-  const match = await crypto.subtle.timingSafeEqual(a, b);
-  if (!match || key.length === 0) {
+  const adminKey = env.ADMIN_KEY ?? '';
+
+  if (key.length === 0 || key.length > 512 || adminKey.length === 0) {
+    throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
+  }
+
+  const match = await safeEqualSecret(key, adminKey);
+  if (!match) {
     throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
   }
 }

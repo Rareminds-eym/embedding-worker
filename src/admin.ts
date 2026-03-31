@@ -6,6 +6,8 @@ import { sha256 } from './utils/hash';
 import { jsonOk } from './utils/response';
 import { ERROR_CODES } from './constants';
 
+const MAX_ADMIN_BODY_SIZE = 10_000;
+
 function generateToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return `sk_${Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')}`;
@@ -13,7 +15,18 @@ function generateToken(): string {
 
 // POST /admin/tenant
 async function createTenant(request: Request, env: Env): Promise<Response> {
-  const body = await request.json().catch(() => null) as {
+  const bodyText = await request.text().catch(() => '');
+  if (bodyText.length > MAX_ADMIN_BODY_SIZE) {
+    throw new ValidationError('Request body too large', ERROR_CODES.INVALID_INPUT);
+  }
+
+  const body = (() => {
+    try { return JSON.parse(bodyText) as {
+      id?: string;
+      name?: string;
+    }; }
+    catch { return null; }
+  })() as {
     id?: string;
     name?: string;
   } | null;
@@ -23,6 +36,9 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
 
   if (!/^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$/.test(body.id)) {
     throw new ValidationError('id must be lowercase alphanumeric with hyphens, 2–64 chars, and cannot start or end with a hyphen', ERROR_CODES.INVALID_INPUT);
+  }
+  if (typeof body.name !== 'string' || body.name.trim().length < 2 || body.name.trim().length > 100) {
+    throw new ValidationError('name must be a string between 2 and 100 characters', ERROR_CODES.INVALID_INPUT);
   }
   const tenantId = body.id;
 
@@ -35,7 +51,7 @@ async function createTenant(request: Request, env: Env): Promise<Response> {
   const hash = await sha256(token);
 
   const tenant: TenantConfig = {
-    name: body.name,
+    name: body.name.trim(),
     created_at: new Date().toISOString(),
   };
 
