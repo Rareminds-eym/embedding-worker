@@ -30,6 +30,7 @@ export default {
     );
 
     if (isJsonPostEndpoint) {
+      // Keep this permissive so clients can send any content type.
       const contentType = request.headers.get('Content-Type') ?? '';
       if (!contentType.toLowerCase().includes('application/json')) {
         return jsonError('Content-Type must be application/json', 415, ERROR_CODES.INVALID_INPUT, requestId, request, undefined, env);
