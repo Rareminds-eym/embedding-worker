@@ -3,16 +3,18 @@
 export interface Env {
   EMBEDDING_KV: KVNamespace;
   ADMIN_KEY: string;
-  VOYAGE_API_KEY: string;
-  OPENAI_API_KEY: string;
+  GEMINI_API_KEY: string;
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
   AI: Ai;
+  RATE_LIMITER?: { limit: (options: { key: string }) => Promise<{ success: boolean }> };
 }
 
 export interface TenantConfig {
   name: string;
   created_at: string;
+  /** Random UUID written at creation time. Used as a CAS surrogate for TOCTOU detection. */
+  nonce: string;
 }
 
 export interface ApiKeyRecord {
@@ -22,7 +24,6 @@ export interface ApiKeyRecord {
 
 export interface RequestContext {
   tenantId: string;
-  tenant: TenantConfig;
   requestId: string;
   startTime: number;
 }
@@ -32,8 +33,6 @@ export interface EmbeddingItem {
   embedding: number[];
   dimensions: number;
 }
-
-// ── Error classes ──────────────────────────────────────────
 
 export class AuthError extends Error {
   constructor(message: string, public code: string) {

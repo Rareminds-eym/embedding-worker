@@ -1,6 +1,6 @@
 name = "embedding-worker"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
+compatibility_date = "2025-03-20"
 compatibility_flags = ["nodejs_compat"]
 
 [dev]
@@ -21,13 +21,27 @@ ENVIRONMENT = "local"
 ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788"
 
 [[kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"
-preview_id = "REPLACE_WITH_LOCAL_KV_ID"
+binding    = "EMBEDDING_KV"
+id         = "REPLACE_WITH_LOCAL_KV_ID"      # local dev — replace with your actual local KV namespace ID
+preview_id = "REPLACE_WITH_LOCAL_KV_ID"      # used by wrangler dev; same as id for local
+
+# Native rate limiting — counters are cached per Cloudflare location and updated
+# asynchronously. namespace_id is a positive integer you choose. period must be 10 or 60.
+# The key passed at runtime is tenantId:endpoint.
+[[unsafe.bindings]]
+name         = "RATE_LIMITER"
+type         = "ratelimit"
+namespace_id = "1001"
+simple       = { limit = 120, period = 60 }
+
+# KV key schema:
+#   tenant:<id>                        → TenantConfig JSON
+#   api_keys:<sha256>                  → ApiKeyRecord JSON
+#   tenant_keys:<tenantId>:<sha256>    → "1" (reverse index for tenant key deletion)
+#   delete:tenant:<id>                 → deletion-in-progress flag (TTL 300s)
 
 # wrangler secret put ADMIN_KEY
-# wrangler secret put VOYAGE_API_KEY
-# wrangler secret put OPENAI_API_KEY
+# wrangler secret put GEMINI_API_KEY
 
 # ============================================================================
 # DEVELOPMENT  →  wrangler deploy --env dev
@@ -37,7 +51,7 @@ preview_id = "REPLACE_WITH_LOCAL_KV_ID"
 binding = "AI"
 
 [env.dev.vars]
-ENVIRONMENT = "development"
+ENVIRONMENT = "dev"
 ALLOWED_ORIGINS = "https://dev.skillpassports.com"
 
 [[env.dev.kv_namespaces]]
@@ -45,8 +59,7 @@ binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_DEV_KV_ID"
 
 # wrangler secret put ADMIN_KEY      --env dev
-# wrangler secret put VOYAGE_API_KEY --env dev
-# wrangler secret put OPENAI_API_KEY --env dev
+# wrangler secret put GEMINI_API_KEY --env dev
 
 # ============================================================================
 # STAGING  →  wrangler deploy --env staging
@@ -64,8 +77,7 @@ binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_STAGING_KV_ID"
 
 # wrangler secret put ADMIN_KEY      --env staging
-# wrangler secret put VOYAGE_API_KEY --env staging
-# wrangler secret put OPENAI_API_KEY --env staging
+# wrangler secret put GEMINI_API_KEY --env staging
 
 # ============================================================================
 # PRODUCTION  →  wrangler deploy --env production
@@ -80,8 +92,7 @@ ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
 
 [[env.production.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"
+id = "REPLACE_WITH_PRODUCTION_KV_ID"  # ⚠️ Must be replaced before deployment
 
 # wrangler secret put ADMIN_KEY      --env production
-# wrangler secret put VOYAGE_API_KEY --env production
-# wrangler secret put OPENAI_API_KEY --env production
+# wrangler secret put GEMINI_API_KEY --env production
