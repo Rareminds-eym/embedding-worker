@@ -15,7 +15,7 @@ const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models
 const GEMINI_MODEL = 'gemini-embedding-2-preview';
 const GEMINI_AUTH_HEADER = 'x-goog-api-key';
 export const GEMINI_TIMEOUT_MS = 30_000;
-const GEMINI_OUTPUT_DIM = 3072;
+const GEMINI_OUTPUT_DIM = 1536;
 const GEMINI_ERROR_PREVIEW = 200;
 
 export const GEMINI_MODEL_ID = GEMINI_MODEL;

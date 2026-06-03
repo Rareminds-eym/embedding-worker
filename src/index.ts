@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import type { Env } from './types';
+import { EmbeddingService } from './entrypoint';
 import { authenticate, authenticateAdmin } from './auth';
 import { handleTextEmbed } from './handlers/text';
 import { handleImageEmbed } from './handlers/image';
@@ -39,8 +40,12 @@ function getCachedConfigError(env: Env): string | null {
   return _cachedConfigError;
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+/**
+ * HTTP request router. Serves external callers over HTTPS: /health, /admin/*,
+ * and the Bearer-authenticated /embeddings/* endpoints. Internal worker-to-worker
+ * callers should prefer the typed RPC methods on {@link EmbeddingService}.
+ */
+async function handleHttpRequest(request: Request, env: Env): Promise<Response> {
     // Accept a client-supplied request ID only if it passes strict validation.
     // The value is regex-gated before use, so it is safe to echo in logs and
     // response headers. Always generate a fresh UUID if the header is absent or invalid.
@@ -114,5 +119,16 @@ export default {
     } catch (err) {
       return handleError(err, requestId, request, env);
     }
-  },
-} satisfies ExportedHandler<Env>;
+}
+
+// Attach the HTTP router to the entrypoint prototype so a single deployed worker
+// serves both RPC (service bindings) and HTTP (external clients). On a
+// WorkerEntrypoint, fetch receives only the Request; env/ctx are on `this`.
+EmbeddingService.prototype.fetch = function (request: Request): Promise<Response> {
+  return handleHttpRequest(request, this.env);
+};
+
+// Named export required by the consumer's service binding (`entrypoint = "EmbeddingService"`);
+// the default export serves as the worker's HTTP/default handler.
+export { EmbeddingService };
+export default EmbeddingService;

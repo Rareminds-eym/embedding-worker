@@ -1,4 +1,7 @@
-name = "embedding-worker"
+# Deployed worker name. Must match the `service` value of the EMBEDDING_SERVICE
+# binding in the consuming app's wrangler.toml, and the existing public URL
+# (embedding-api.<account>.workers.dev).
+name = "embedding-api"
 main = "src/index.ts"
 compatibility_date = "2025-03-20"
 compatibility_flags = ["nodejs_compat"]
@@ -13,8 +16,12 @@ enabled = true
 # ============================================================================
 # LOCAL  →  wrangler dev  (uses preview_id for KV, secrets from .dev.vars)
 # ============================================================================
-[ai]
-binding = "AI"
+# NOTE: Workers AI (`AI`) has no local emulation — it always proxies to
+# Cloudflare and needs `wrangler login`. It is only used for PDF→markdown
+# (env.AI.toMarkdown). Disabled locally so `wrangler dev` runs fully local;
+# text/image/doc embeddings go through GEMINI_API_KEY and are unaffected.
+# [ai]
+# binding = "AI"
 
 [vars]
 ENVIRONMENT = "local"
