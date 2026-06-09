@@ -1,6 +1,6 @@
 name = "embedding-worker"
 main = "src/index.ts"
-compatibility_date = "2025-03-20"
+compatibility_date = "2026-06-08"
 compatibility_flags = ["nodejs_compat"]
 
 [dev]
@@ -58,6 +58,12 @@ ALLOWED_ORIGINS = "https://dev.skillpassports.com"
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_DEV_KV_ID"
 
+[[env.dev.unsafe.bindings]]
+name         = "RATE_LIMITER"
+type         = "ratelimit"
+namespace_id = "1002"
+simple       = { limit = 120, period = 60 }
+
 # wrangler secret put ADMIN_KEY      --env dev
 # wrangler secret put GEMINI_API_KEY --env dev
 
@@ -76,6 +82,12 @@ ALLOWED_ORIGINS = "https://stag.skillpassports.com"
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_STAGING_KV_ID"
 
+[[env.staging.unsafe.bindings]]
+name         = "RATE_LIMITER"
+type         = "ratelimit"
+namespace_id = "1003"
+simple       = { limit = 120, period = 60 }
+
 # wrangler secret put ADMIN_KEY      --env staging
 # wrangler secret put GEMINI_API_KEY --env staging
 
@@ -93,6 +105,12 @@ ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
 [[env.production.kv_namespaces]]
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_PRODUCTION_KV_ID"  # ⚠️ Must be replaced before deployment
+
+[[env.production.unsafe.bindings]]
+name         = "RATE_LIMITER"
+type         = "ratelimit"
+namespace_id = "1004"
+simple       = { limit = 120, period = 60 }
 
 # wrangler secret put ADMIN_KEY      --env production
 # wrangler secret put GEMINI_API_KEY --env production
