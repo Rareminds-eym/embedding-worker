@@ -184,7 +184,7 @@ export async function embedDocCore(
 
     const embedding = await callPdfProvider(doc.data, env.GEMINI_API_KEY, callerId);
 
-    console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'pdf-native', tenant_id: callerId, model: GEMINI_MODEL_ID }));
+    console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'pdf-native', caller_id: callerId, model: GEMINI_MODEL_ID }));
 
     return {
       embeddings: [{ index: 0, embedding, dimensions: embedding.length }],
@@ -228,7 +228,7 @@ export async function embedDocCore(
     if (err instanceof WorkerError || err instanceof ValidationError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const isTimeout = /timeout|timed out/i.test(msg);
-    console.error(JSON.stringify({ event: 'toMarkdown.error', tenant_id: callerId, filename, mimeType, binary_size: binaryData.length, error: msg }));
+    console.error(JSON.stringify({ event: 'toMarkdown.error', caller_id: callerId, filename, mimeType, binary_size: binaryData.length, error: msg }));
     throw new WorkerError(
       isTimeout ? 'Document conversion timed out. The file may be too large or complex.' : 'Document conversion failed. The file may be corrupted or unsupported.',
       ERROR_CODES.INTERNAL_ERROR,
@@ -238,7 +238,7 @@ export async function embedDocCore(
 
   if (conversionResult.format === 'error' || !conversionResult.data) {
     if (conversionResult.error) {
-      console.error(JSON.stringify({ event: 'toMarkdown.format_error', tenant_id: callerId, filename, mimeType, detail: conversionResult.error }));
+      console.error(JSON.stringify({ event: 'toMarkdown.format_error', caller_id: callerId, filename, mimeType, detail: conversionResult.error }));
     }
     throw new ValidationError(
       'Document could not be converted. Ensure the file is not password-protected, corrupted, or empty.',
@@ -294,7 +294,7 @@ export async function embedDocCore(
 
   const providerResult = await callDocProvider(chunks, env.GEMINI_API_KEY, callerId);
 
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', tenant_id: callerId, model: GEMINI_MODEL_ID, chunks: chunks.length }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', caller_id: callerId, model: GEMINI_MODEL_ID, chunks: chunks.length }));
 
   return {
     embeddings: providerResult.embeddings.map((item): EmbeddingItem => ({
@@ -322,7 +322,7 @@ export async function handleDocEmbed(
   env: Env
 ): Promise<Response> {
   const bodyText = await request.text().catch((err) => {
-    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'doc', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'doc', caller_id: ctx.callerId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
   });
   if (bodyText.length > MAX_DOC_REQUEST_BODY_SIZE) {
@@ -353,7 +353,7 @@ export async function handleDocEmbed(
     return v;
   })();
 
-  const result = await embedDocCore(body.input, maxPages, env, ctx.tenantId);
+  const result = await embedDocCore(body.input, maxPages, env, ctx.callerId);
 
   const latency_ms = Date.now() - ctx.startTime;
 

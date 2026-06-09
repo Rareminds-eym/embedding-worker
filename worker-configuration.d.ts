@@ -4,7 +4,7 @@
 interface __BaseEnv_Env {
 	EMBEDDING_KV: KVNamespace;
 	AI: Ai;
-	ADMIN_KEY: string;
+	EMBEDDING_API_KEY: string;
 	GEMINI_API_KEY: string;
 	ENVIRONMENT: string;
 	ALLOWED_ORIGINS: string;
@@ -17,7 +17,7 @@ declare namespace Cloudflare {
 	interface DevEnv {
 		EMBEDDING_KV: KVNamespace;
 		AI: Ai;
-		ADMIN_KEY: string;
+		EMBEDDING_API_KEY: string;
 		GEMINI_API_KEY: string;
 		ENVIRONMENT: string;
 		ALLOWED_ORIGINS: string;
@@ -25,7 +25,7 @@ declare namespace Cloudflare {
 	interface StagingEnv {
 		EMBEDDING_KV: KVNamespace;
 		AI: Ai;
-		ADMIN_KEY: string;
+		EMBEDDING_API_KEY: string;
 		GEMINI_API_KEY: string;
 		ENVIRONMENT: string;
 		ALLOWED_ORIGINS: string;
@@ -33,7 +33,7 @@ declare namespace Cloudflare {
 	interface ProductionEnv {
 		EMBEDDING_KV: KVNamespace;
 		AI: Ai;
-		ADMIN_KEY: string;
+		EMBEDDING_API_KEY: string;
 		GEMINI_API_KEY: string;
 		ENVIRONMENT: string;
 		ALLOWED_ORIGINS: string;

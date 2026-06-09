@@ -103,12 +103,12 @@ function parseInput(input: unknown): ImageInput[] {
   return [toItem(input)];
 }
 
-async function fetchImageAsBase64(url: string, tenantId: string): Promise<{ data: string; mediaType: SupportedMediaType }> {
+async function fetchImageAsBase64(url: string, callerId: string): Promise<{ data: string; mediaType: SupportedMediaType }> {
   let res: Response;
   try {
     res = await fetch(url, { signal: AbortSignal.timeout(MAX_IMAGE_FETCH_TIMEOUT_MS) });
   } catch (err) {
-    console.error(JSON.stringify({ event: 'image_fetch.error', tenant_id: tenantId, error: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ event: 'image_fetch.error', caller_id: callerId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to fetch image URL', ERROR_CODES.INTERNAL_ERROR, 502);
   }
 
@@ -118,7 +118,7 @@ async function fetchImageAsBase64(url: string, tenantId: string): Promise<{ data
 
   const resolvedHostname = new URL(res.url).hostname;
   if (isPrivateHost(resolvedHostname)) {
-    console.error(JSON.stringify({ event: 'ssrf.redirect_blocked', tenant_id: tenantId, resolved: resolvedHostname }));
+    console.error(JSON.stringify({ event: 'ssrf.redirect_blocked', caller_id: callerId, resolved: resolvedHostname }));
     throw new ValidationError('URL resolved to a private or internal address', ERROR_CODES.INVALID_INPUT);
   }
 
@@ -235,7 +235,7 @@ export async function handleImageEmbed(
   env: Env
 ): Promise<Response> {
   const bodyText = await request.text().catch((err) => {
-    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'image', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'image', caller_id: ctx.callerId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
   });
 
@@ -259,10 +259,10 @@ export async function handleImageEmbed(
     );
   }
 
-  const result = await embedImageCore(body.input, env, ctx.tenantId);
+  const result = await embedImageCore(body.input, env, ctx.callerId);
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'image', tenant_id: ctx.tenantId, latency_ms, model: result.model, count: result.embeddings.length }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'image', caller_id: ctx.callerId, latency_ms, model: result.model, count: result.embeddings.length }));
 
   return jsonOk({
     success: true,

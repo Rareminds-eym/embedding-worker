@@ -57,7 +57,7 @@ export interface DocInput {
 
 /**
  * The synthetic caller id used for rate-limit bucketing and log correlation on
- * RPC calls. HTTP callers bucket per tenant; binding callers share this bucket.
+ * RPC calls. HTTP callers share the `http` bucket; binding callers share this bucket.
  */
 const RPC_CALLER_ID = 'rpc';
 

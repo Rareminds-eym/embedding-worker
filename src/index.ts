@@ -2,11 +2,10 @@
 
 import type { Env } from './types';
 import { EmbeddingService } from './entrypoint';
-import { authenticate, authenticateAdmin } from './auth';
+import { authenticate } from './auth';
 import { handleTextEmbed } from './handlers/text';
 import { handleImageEmbed } from './handlers/image';
 import { handleDocEmbed } from './handlers/doc';
-import { handleAdmin } from './admin';
 import { generateRequestId, getCorsHeaders, jsonOk, jsonError, handleError, validateCorsOrigins } from './utils/response';
 import { API_VERSION, ERROR_CODES } from './constants';
 
@@ -19,8 +18,8 @@ function runStartupValidation(env: Env): string | null {
     }
   }
 
-  if (!env.ADMIN_KEY || env.ADMIN_KEY.length < 32) {
-    return 'ADMIN_KEY is missing or too weak (min 32 chars)';
+  if (!env.EMBEDDING_API_KEY || env.EMBEDDING_API_KEY.length < 32) {
+    return 'EMBEDDING_API_KEY is missing or too weak (min 32 chars)';
   }
 
   if (env.ENVIRONMENT !== 'local' && !env.RATE_LIMITER) {
@@ -80,11 +79,6 @@ async function handleHttpRequest(request: Request, env: Env): Promise<Response> 
           timestamp: new Date().toISOString(),
           checks: { kv: kvHealthy },
         }, kvHealthy ? 200 : 503, request, env);
-      }
-
-      if (pathname.startsWith('/admin/')) {
-        await authenticateAdmin(request, env);
-        return await handleAdmin(request, env);
       }
 
       if (pathname.startsWith('/embeddings/')) {

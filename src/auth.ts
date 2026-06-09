@@ -1,78 +1,58 @@
 /// <reference types="@cloudflare/workers-types" />
 
-import type { Env, RequestContext, ApiKeyRecord } from './types';
+import type { Env, RequestContext } from './types';
 import { AuthError } from './types';
-import { sha256 } from './utils/hash';
 
-const TOKEN_REGEX = /^sk_[a-f0-9]{48}$/;
+/**
+ * Synthetic caller id used for rate-limit bucketing and log correlation on HTTP
+ * requests. All authorized HTTP callers share one API key and therefore one
+ * bucket. RPC (service-binding) callers use their own constant in entrypoint.ts.
+ */
+const HTTP_CALLER_ID = 'http';
 
+/**
+ * Authenticate an inbound HTTP request against the single shared API key
+ * (`env.EMBEDDING_API_KEY`).
+ *
+ * Every authorized caller (SkillPassport and future internal services) presents
+ * the same secret. This mirrors the email-worker auth model. If per-caller
+ * isolation is ever needed, introduce a key-to-caller map here.
+ *
+ * Accepted headers, in priority order:
+ *   1. `X-Internal-Api-Key: <key>`   (preferred — signals internal service caller)
+ *   2. `X-API-Key: <key>`            (backward-compatible fallback)
+ *   3. `Authorization: Bearer <key>` (RFC 6750 fallback)
+ *
+ * Security: both the supplied key and the secret are hashed to fixed-length
+ * SHA-256 digests and compared with `crypto.subtle.timingSafeEqual`. Hashing
+ * first yields constant-length inputs, eliminating the length side-channel that
+ * a raw comparison would leak over network round-trip timing.
+ *
+ * @throws {AuthError} (401) when the key is missing or does not match.
+ */
 export async function authenticate(request: Request, env: Env, requestId: string): Promise<RequestContext> {
-  const authHeader = request.headers.get('Authorization');
-  if (!authHeader?.startsWith('Bearer ')) {
-    throw new AuthError('Missing or invalid Authorization header', 'UNAUTHORIZED');
-  }
+  const apiKey =
+    request.headers.get('X-Internal-Api-Key') ||
+    request.headers.get('X-API-Key') ||
+    request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
 
-  const token = authHeader.slice(7).trim();
-  if (!TOKEN_REGEX.test(token)) {
-    throw new AuthError('Invalid API key format', 'UNAUTHORIZED');
-  }
-
-  const hash = await sha256(token);
-  const keyRaw = await env.EMBEDDING_KV.get(`api_keys:${hash}`);
-  if (!keyRaw) {
-    throw new AuthError('Invalid API key', 'UNAUTHORIZED');
-  }
-
-  let keyRecord: ApiKeyRecord;
-  try {
-    const parsed: unknown = JSON.parse(keyRaw);
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      typeof (parsed as Record<string, unknown>).tenant_id !== 'string'
-    ) {
-      throw new Error('invalid key record shape');
-    }
-    keyRecord = parsed as ApiKeyRecord;
-  } catch {
-    console.error(JSON.stringify({ event: 'auth.corrupt_key_record', timestamp: Date.now() }));
-    throw new AuthError('Invalid API key', 'UNAUTHORIZED');
-  }
-
-  const [tenantRaw, deletionPending] = await Promise.all([
-    env.EMBEDDING_KV.get(`tenant:${keyRecord.tenant_id}`),
-    env.EMBEDDING_KV.get(`delete:tenant:${keyRecord.tenant_id}`),
-  ]);
-
-  if (!tenantRaw) {
-    throw new AuthError('Tenant not found', 'UNAUTHORIZED');
-  }
-  if (deletionPending) {
-    throw new AuthError('Tenant is being deleted', 'UNAUTHORIZED');
-  }
-
-  return {
-    tenantId: keyRecord.tenant_id,
-    requestId,
-    startTime: Date.now(),
-  };
-}
-
-export async function authenticateAdmin(request: Request, env: Env): Promise<void> {
-  const key = request.headers.get('X-Admin-Key') ?? '';
-  const expected = env.ADMIN_KEY ?? '';
-  
-  if (!key || !expected) {
-    throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
+  if (!apiKey) {
+    throw new AuthError('Missing API key', 'UNAUTHORIZED');
   }
 
   const enc = new TextEncoder();
-  const [hashA, hashB] = await Promise.all([
-    crypto.subtle.digest('SHA-256', enc.encode(key)),
-    crypto.subtle.digest('SHA-256', enc.encode(expected)),
+  const [suppliedHash, expectedHash] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(apiKey)),
+    crypto.subtle.digest('SHA-256', enc.encode(env.EMBEDDING_API_KEY)),
   ]);
-  
-  if (!crypto.subtle.timingSafeEqual(hashA, hashB)) {
-    throw new AuthError('Invalid or missing admin key', 'UNAUTHORIZED');
+
+  if (!crypto.subtle.timingSafeEqual(suppliedHash, expectedHash)) {
+    throw new AuthError('Invalid API key', 'UNAUTHORIZED');
   }
+
+  return {
+    callerId: HTTP_CALLER_ID,
+    requestId,
+    startTime: Date.now(),
+  };
 }

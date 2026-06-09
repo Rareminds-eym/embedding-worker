@@ -163,7 +163,7 @@ export interface TextEmbedResult {
  * @param taskType - Optional task type; pass undefined for the default.
  * @param env - Worker environment bindings.
  * @param callerId - Identifier used for rate-limit bucketing and logging
- *   (the tenant id for HTTP, a service tag like `rpc` for service bindings).
+ *   (`http` for HTTP callers, `rpc` for service bindings).
  * @returns The embedding vector plus model metadata.
  * @throws ValidationError on invalid/empty/oversized input or task_type.
  * @throws WorkerError when GEMINI_API_KEY is not configured.
@@ -234,7 +234,7 @@ export async function handleTextEmbed(
   env: Env
 ): Promise<Response> {
   const bodyText = await request.text().catch((err) => {
-    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'text', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'text', caller_id: ctx.callerId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
   });
   if (bodyText.length > MAX_REQUEST_BODY_SIZE) {
@@ -261,10 +261,10 @@ export async function handleTextEmbed(
   // absent one falls back to the default inside embedTextCore.
   const taskType = 'task_type' in body ? body.task_type : undefined;
 
-  const result = await embedTextCore(body.input, taskType as string | undefined, env, ctx.tenantId);
+  const result = await embedTextCore(body.input, taskType as string | undefined, env, ctx.callerId);
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', tenant_id: ctx.tenantId, latency_ms, model: result.model }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', caller_id: ctx.callerId, latency_ms, model: result.model }));
 
   return jsonOk({
     success: true,

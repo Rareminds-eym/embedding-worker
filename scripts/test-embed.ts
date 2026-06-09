@@ -6,15 +6,16 @@
  *   2. Run: npx tsx scripts/test-embed.ts
  *
  * Override defaults via env vars:
- *   API_URL=https://embedding-worker.workers.dev API_KEY=sk_... npx tsx scripts/test-embed.ts
+ *   API_URL=https://embedding-worker.workers.dev API_KEY=<shared-key> npx tsx scripts/test-embed.ts
+ *
+ * The API key is the single shared EMBEDDING_API_KEY secret. Locally it defaults
+ * to the value in .dev.vars.
  */
 
 const API_URL = process.env.API_URL || 'http://127.0.0.1:9004';
-const ADMIN_KEY = process.env.ADMIN_KEY || 'ew-local-admin-key-change-me-32chars';
-const TENANT_ID = 'test-tenant';
-const TENANT_NAME = 'Test Tenant';
 
-let API_KEY = process.env.API_KEY || '';
+// Single shared API key — must match env.EMBEDDING_API_KEY on the worker.
+const API_KEY = process.env.API_KEY || 'ew-local-api-key-change-me-32chars-min';
 
 interface EmbeddingResult {
   index: number;
@@ -56,7 +57,7 @@ interface ApiResponse {
   next_cursor?: string;
 }
 
-const EXPECTED_DIMENSIONS = 3072;
+const EXPECTED_DIMENSIONS = 1536;
 const EXPECTED_MODEL = 'gemini-embedding-2-preview';
 const FETCH_TIMEOUT_MS = 10_000;
 const BASE64_TO_BYTES_RATIO = 0.75;
@@ -68,15 +69,10 @@ function fail(label: string, detail?: unknown) {
   if (detail !== undefined) console.error('     ', JSON.stringify(detail, null, 2));
 }
 
-async function post(path: string, body: unknown, auth: 'bearer' | 'admin') {
+async function post(path: string, body: unknown, auth: 'bearer') {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (auth === 'bearer') headers['Authorization'] = `Bearer ${API_KEY}`;
-  if (auth === 'admin')  headers['X-Admin-Key'] = ADMIN_KEY;
   return fetch(`${API_URL}${path}`, { method: 'POST', headers, body: JSON.stringify(body) });
-}
-
-async function del(path: string) {
-  return fetch(`${API_URL}${path}`, { method: 'DELETE', headers: { 'X-Admin-Key': ADMIN_KEY } });
 }
 
 async function testHealth() {
@@ -89,18 +85,38 @@ async function testHealth() {
   else pass(`GET /health → ok (version=${data.version})`);
 }
 
-async function setupTenant(): Promise<boolean> {
-  console.log('\n[admin] setup tenant');
-  await del(`/admin/tenant?id=${TENANT_ID}`);
-  const res = await post('/admin/tenant', { id: TENANT_ID, name: TENANT_NAME }, 'admin');
-  const data = await res.json() as ApiResponse;
-  if (res.status === 201 && typeof data.api_key === 'string') {
-    API_KEY = data.api_key;
-    pass(`Created tenant '${TENANT_ID}', got API key`);
-    return true;
+async function testAuth() {
+  console.log('\n[auth]');
+
+  {
+    const res = await fetch(`${API_URL}/embeddings/text`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'test' }),
+    });
+    if (res.status === 401) pass('no key → 401');
+    else fail('no key should be 401', await res.json());
   }
-  fail('POST /admin/tenant', data);
-  return false;
+
+  {
+    const res = await fetch(`${API_URL}/embeddings/text`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer wrong-key-value', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'test' }),
+    });
+    if (res.status === 401) pass('wrong key → 401');
+    else fail('wrong key should be 401', await res.json());
+  }
+
+  {
+    const res = await fetch(`${API_URL}/embeddings/text`, {
+      method: 'POST',
+      headers: { 'X-Internal-Api-Key': API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ input: 'test' }),
+    });
+    if (res.ok) pass('X-Internal-Api-Key header → accepted');
+    else fail('X-Internal-Api-Key should be accepted', await res.json());
+  }
 }
 
 async function testTextEmbed() {
@@ -417,105 +433,16 @@ async function testDocEmbed() {
   }
 }
 
-async function testAdminRoutes() {
-  console.log('\n[admin]');
-
-  {
-    const res = await fetch(`${API_URL}/admin/tenant?id=${TENANT_ID}`, { headers: { 'X-Admin-Key': ADMIN_KEY } });
-    const data = await res.json() as ApiResponse;
-    if (res.ok && data.tenant_id === TENANT_ID) pass('GET /admin/tenant → found');
-    else fail('GET /admin/tenant', data);
-  }
-
-  {
-    const res = await fetch(`${API_URL}/admin/tenant?id=nonexistent-tenant-xyz`, { headers: { 'X-Admin-Key': ADMIN_KEY } });
-    if (res.status === 404) pass('GET /admin/tenant (nonexistent) → 404');
-    else fail('GET /admin/tenant (nonexistent) should be 404', await res.json());
-  }
-
-  {
-    const res = await fetch(`${API_URL}/admin/tenants`, { headers: { 'X-Admin-Key': ADMIN_KEY } });
-    const data = await res.json() as ApiResponse;
-    if (res.ok && Array.isArray(data.tenants) && typeof data.count === 'number') pass('GET /admin/tenants → list with count');
-    else fail('GET /admin/tenants', data);
-  }
-
-  {
-    const secondId = `test-tenant-pagination-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    await del(`/admin/tenant?id=${secondId}`);
-    await post('/admin/tenant', { id: secondId, name: 'Pagination Seed' }, 'admin');
-    try {
-      const res = await fetch(`${API_URL}/admin/tenants?limit=1`, { headers: { 'X-Admin-Key': ADMIN_KEY } });
-      const data = await res.json() as ApiResponse;
-      if (res.ok && Array.isArray(data.tenants) && data.tenants.length === 1 && typeof data.next_cursor === 'string') {
-        pass('GET /admin/tenants?limit=1 → 1 result + next_cursor');
-      } else {
-        fail('GET /admin/tenants?limit=1', data);
-      }
-    } finally {
-      await del(`/admin/tenant?id=${secondId}`);
-    }
-  }
-
-  {
-    const res = await post('/admin/tenant', { id: TENANT_ID, name: 'Duplicate' }, 'admin');
-    if (res.status === 409) pass('duplicate tenant → 409');
-    else fail('duplicate should be 409', await res.json());
-  }
-
-  {
-    const res = await post('/admin/tenant', { id: 'INVALID ID!', name: 'Bad' }, 'admin');
-    if (res.status === 400) pass('invalid tenant ID → 400');
-    else fail('invalid tenant ID should be 400', await res.json());
-  }
-
-  {
-    const res = await fetch(`${API_URL}/admin/tenant`, {
-      method: 'PUT',
-      headers: { 'X-Admin-Key': ADMIN_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: 'test', name: 'Test' }),
-    });
-    if (res.status === 405) pass('PUT /admin/tenant → 405');
-    else fail('PUT /admin/tenant should be 405', await res.json());
-  }
-
-  {
-    const res = await fetch(`${API_URL}/admin/tenants`, { headers: { 'X-Admin-Key': 'wrong-key' } });
-    if (res.status === 401) pass('wrong admin key → 401');
-    else fail('wrong admin key should be 401', await res.json());
-  }
-
-  {
-    const res = await del(`/admin/tenant?id=nonexistent-tenant-xyz`);
-    if (res.status === 404) pass('DELETE /admin/tenant (nonexistent) → 404');
-    else fail('DELETE /admin/tenant (nonexistent) should be 404', await res.json());
-  }
-}
-
-async function teardown() {
-  console.log('\n[cleanup]');
-  const res = await del(`/admin/tenant?id=${TENANT_ID}`);
-  const data = await res.json() as ApiResponse;
-  if (res.ok) pass(`Deleted tenant '${TENANT_ID}'`);
-  else fail('DELETE /admin/tenant', data);
-}
-
 async function main() {
   console.log(`\nEmbedding Worker Test Suite`);
   console.log(`Target: ${API_URL}`);
 
   try {
     await testHealth();
-    const ready = await setupTenant();
-    if (!ready) {
-      console.error('\nCannot proceed without a valid API key. Aborting.');
-      process.exit(1);
-    }
+    await testAuth();
     await testTextEmbed();
     await testImageEmbed();
     await testDocEmbed();
-    await testAdminRoutes();
-    await teardown();
     console.log('\nDone.\n');
   } catch (err) {
     console.error('\nUnexpected error:', err);

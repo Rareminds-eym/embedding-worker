@@ -2,7 +2,8 @@
 
 export interface Env {
   EMBEDDING_KV: KVNamespace;
-  ADMIN_KEY: string;
+  /** Single shared API key for all authorized HTTP callers. */
+  EMBEDDING_API_KEY: string;
   GEMINI_API_KEY: string;
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
@@ -10,20 +11,9 @@ export interface Env {
   RATE_LIMITER?: { limit: (options: { key: string }) => Promise<{ success: boolean }> };
 }
 
-export interface TenantConfig {
-  name: string;
-  created_at: string;
-  /** Random UUID written at creation time. Used as a CAS surrogate for TOCTOU detection. */
-  nonce: string;
-}
-
-export interface ApiKeyRecord {
-  tenant_id: string;
-  created_at: string;
-}
-
 export interface RequestContext {
-  tenantId: string;
+  /** Synthetic caller id for rate-limit bucketing and log correlation. */
+  callerId: string;
   requestId: string;
   startTime: number;
 }

@@ -34,7 +34,8 @@ preview_id = "REPLACE_WITH_LOCAL_KV_ID"      # used by wrangler dev; same as id 
 
 # Native rate limiting — counters are cached per Cloudflare location and updated
 # asynchronously. namespace_id is a positive integer you choose. period must be 10 or 60.
-# The key passed at runtime is tenantId:endpoint.
+# The key passed at runtime is callerId:endpoint (callerId is "http" for all
+# HTTP callers — single shared API key — or "rpc" for service-binding callers).
 [[unsafe.bindings]]
 name         = "RATE_LIMITER"
 type         = "ratelimit"
@@ -42,12 +43,10 @@ namespace_id = "1001"
 simple       = { limit = 120, period = 60 }
 
 # KV key schema:
-#   tenant:<id>                        → TenantConfig JSON
-#   api_keys:<sha256>                  → ApiKeyRecord JSON
-#   tenant_keys:<tenantId>:<sha256>    → "1" (reverse index for tenant key deletion)
-#   delete:tenant:<id>                 → deletion-in-progress flag (TTL 300s)
+#   rl:<callerId>:<endpoint>:<window>  → rate-limit counter (fallback limiter)
+#   health:check                       → health probe key
 
-# wrangler secret put ADMIN_KEY
+# wrangler secret put EMBEDDING_API_KEY
 # wrangler secret put GEMINI_API_KEY
 
 # ============================================================================
@@ -65,7 +64,7 @@ ALLOWED_ORIGINS = "https://dev.skillpassports.com"
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_DEV_KV_ID"
 
-# wrangler secret put ADMIN_KEY      --env dev
+# wrangler secret put EMBEDDING_API_KEY --env dev
 # wrangler secret put GEMINI_API_KEY --env dev
 
 # ============================================================================
@@ -83,7 +82,7 @@ ALLOWED_ORIGINS = "https://stag.skillpassports.com"
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_STAGING_KV_ID"
 
-# wrangler secret put ADMIN_KEY      --env staging
+# wrangler secret put EMBEDDING_API_KEY --env staging
 # wrangler secret put GEMINI_API_KEY --env staging
 
 # ============================================================================
@@ -101,5 +100,5 @@ ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
 binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_PRODUCTION_KV_ID"  # ⚠️ Must be replaced before deployment
 
-# wrangler secret put ADMIN_KEY      --env production
+# wrangler secret put EMBEDDING_API_KEY --env production
 # wrangler secret put GEMINI_API_KEY --env production
