@@ -22,8 +22,8 @@ ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:8788,http://127.0.0.1:
 
 [[kv_namespaces]]
 binding    = "EMBEDDING_KV"
-id         = "REPLACE_WITH_LOCAL_KV_ID"      # local dev — replace with your actual local KV namespace ID
-preview_id = "REPLACE_WITH_LOCAL_KV_ID"      # used by wrangler dev; same as id for local
+id         = "3cf92ef89a5b43bb9d420169cd68df22"      # local dev — replace with your actual local KV namespace ID
+preview_id = "3cf92ef89a5b43bb9d420169cd68df22"      # used by wrangler dev; same as id for local
 
 # Native rate limiting — counters are cached per Cloudflare location and updated
 # asynchronously. namespace_id is a positive integer you choose. period must be 10 or 60.
@@ -56,7 +56,7 @@ ALLOWED_ORIGINS = "https://dev.skillpassports.com"
 
 [[env.dev.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_DEV_KV_ID"
+id = "8faee86f16cc49989fd17063d15c8929"
 
 [[env.dev.unsafe.bindings]]
 name         = "RATE_LIMITER"
@@ -80,7 +80,7 @@ ALLOWED_ORIGINS = "https://stag.skillpassports.com"
 
 [[env.staging.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_STAGING_KV_ID"
+id = "87fb2ee71c094bf58302e46da00c0f7e"
 
 [[env.staging.unsafe.bindings]]
 name         = "RATE_LIMITER"
@@ -104,7 +104,7 @@ ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
 
 [[env.production.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"  # ⚠️ Must be replaced before deployment
+id = "3cf92ef89a5b43bb9d420169cd68df22"  # ⚠️ Must be replaced before deployment
 
 [[env.production.unsafe.bindings]]
 name         = "RATE_LIMITER"
