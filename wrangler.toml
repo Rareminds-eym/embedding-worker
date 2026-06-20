@@ -1,7 +1,8 @@
-name = "embedding-worker"
+name = "embedding-worker-dev"
 main = "src/index.ts"
 compatibility_date = "2026-06-08"
 compatibility_flags = ["nodejs_compat"]
+account_id = "d10c2b1a3d702c710a036bc5a6d0902e"
 
 [dev]
 port = 9004
@@ -11,19 +12,19 @@ inspector_port = 9231
 enabled = true
 
 # ============================================================================
-# LOCAL  →  wrangler dev  (uses preview_id for KV, secrets from .dev.vars)
+# DEV — wrangler deploy (default, no --env flag)
+# Deploys as: embedding-worker-dev
 # ============================================================================
 [ai]
 binding = "AI"
 
 [vars]
-ENVIRONMENT = "local"
-ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788"
+ENVIRONMENT = "dev"
+ALLOWED_ORIGINS = "https://dev.skillpassports.com,https://*.pages.dev"
 
 [[kv_namespaces]]
 binding    = "EMBEDDING_KV"
-id         = "3cf92ef89a5b43bb9d420169cd68df22"      # local dev — replace with your actual local KV namespace ID
-preview_id = "3cf92ef89a5b43bb9d420169cd68df22"      # used by wrangler dev; same as id for local
+id         = "8faee86f16cc49989fd17063d15c8929"
 
 # Native rate limiting — counters are cached per Cloudflare location and updated
 # asynchronously. namespace_id is a positive integer you choose. period must be 10 or 60.
@@ -31,7 +32,7 @@ preview_id = "3cf92ef89a5b43bb9d420169cd68df22"      # used by wrangler dev; sam
 [[unsafe.bindings]]
 name         = "RATE_LIMITER"
 type         = "ratelimit"
-namespace_id = "1001"
+namespace_id = "1002"
 simple       = { limit = 120, period = 60 }
 
 # KV key schema:
@@ -44,39 +45,18 @@ simple       = { limit = 120, period = 60 }
 # wrangler secret put GEMINI_API_KEY
 
 # ============================================================================
-# DEVELOPMENT  →  wrangler deploy --env dev
-# ============================================================================
-[env.dev]
-[env.dev.ai]
-binding = "AI"
-
-[env.dev.vars]
-ENVIRONMENT = "dev"
-ALLOWED_ORIGINS = "https://dev.skillpassports.com"
-
-[[env.dev.kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "8faee86f16cc49989fd17063d15c8929"
-
-[[env.dev.unsafe.bindings]]
-name         = "RATE_LIMITER"
-type         = "ratelimit"
-namespace_id = "1002"
-simple       = { limit = 120, period = 60 }
-
-# wrangler secret put ADMIN_KEY      --env dev
-# wrangler secret put GEMINI_API_KEY --env dev
-
-# ============================================================================
 # STAGING  →  wrangler deploy --env staging
+# Deploys as: embedding-worker-staging
 # ============================================================================
 [env.staging]
+name = "embedding-worker-staging"
+
 [env.staging.ai]
 binding = "AI"
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
-ALLOWED_ORIGINS = "https://stag.skillpassports.com"
+ALLOWED_ORIGINS = "https://staging.skillpassports.com,https://*.pages.dev"
 
 [[env.staging.kv_namespaces]]
 binding = "EMBEDDING_KV"
@@ -92,15 +72,45 @@ simple       = { limit = 120, period = 60 }
 # wrangler secret put GEMINI_API_KEY --env staging
 
 # ============================================================================
+# DEMO  →  wrangler deploy --env demo
+# Deploys as: embedding-worker-demo
+# ============================================================================
+[env.demo]
+name = "embedding-worker-demo"
+
+[env.demo.ai]
+binding = "AI"
+
+[env.demo.vars]
+ENVIRONMENT = "demo"
+ALLOWED_ORIGINS = "https://demo.skillpassports.com,https://*.pages.dev"
+
+[[env.demo.kv_namespaces]]
+binding = "EMBEDDING_KV"
+id = "PLACEHOLDER_DEMO_KV_ID"  # ⚠️ Must be replaced before deployment
+
+[[env.demo.unsafe.bindings]]
+name         = "RATE_LIMITER"
+type         = "ratelimit"
+namespace_id = "PLACEHOLDER_DEMO_RATELIMIT_ID"
+simple       = { limit = 120, period = 60 }
+
+# wrangler secret put ADMIN_KEY      --env demo
+# wrangler secret put GEMINI_API_KEY --env demo
+
+# ============================================================================
 # PRODUCTION  →  wrangler deploy --env production
+# Deploys as: embedding-worker-production
 # ============================================================================
 [env.production]
+name = "embedding-worker-production"
+
 [env.production.ai]
 binding = "AI"
 
 [env.production.vars]
 ENVIRONMENT = "production"
-ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
+ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com,https://*.pages.dev"
 
 [[env.production.kv_namespaces]]
 binding = "EMBEDDING_KV"
