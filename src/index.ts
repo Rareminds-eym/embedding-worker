@@ -39,8 +39,15 @@ function getCachedConfigError(env: Env): string | null {
   return _cachedConfigError;
 }
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+import { WorkerEntrypoint } from 'cloudflare:workers';
+import { normalizeInput } from './handlers/text';
+import { callTextProvider, GEMINI_DEFAULT_TASK_TYPE, type GeminiTaskType, GEMINI_TASK_TYPES } from './providers';
+import { TEXT_MAX_CHARS } from './constants';
+
+
+export class EmbeddingWorker extends WorkerEntrypoint<Env> {
+  async fetch(request: Request): Promise<Response> {
+    const env = this.env;
     // Accept a client-supplied request ID only if it passes strict validation.
     // The value is regex-gated before use, so it is safe to echo in logs and
     // response headers. Always generate a fresh UUID if the header is absent or invalid.
@@ -114,5 +121,36 @@ export default {
     } catch (err) {
       return handleError(err, requestId, request, env);
     }
-  },
-} satisfies ExportedHandler<Env>;
+  }
+
+  // === True RPC Methods ===
+  
+  async getEmbedding(input: unknown, taskTypeStr?: string): Promise<number[]> {
+    if (!this.env.GEMINI_API_KEY) {
+      throw new Error("GEMINI_API_KEY not set");
+    }
+
+    const { text, truncated } = normalizeInput(input);
+
+    if (text.length === 0) {
+      throw new Error('Input cannot be empty');
+    }
+    if (truncated || text.length > TEXT_MAX_CHARS) {
+      throw new Error(`Input exceeds maximum of ${TEXT_MAX_CHARS} characters. Truncate or summarize your input.`);
+    }
+
+    let taskType: GeminiTaskType = GEMINI_DEFAULT_TASK_TYPE;
+    if (taskTypeStr) {
+      if (!(GEMINI_TASK_TYPES as readonly string[]).includes(taskTypeStr)) {
+        throw new Error(`Invalid task_type. Must be one of: ${GEMINI_TASK_TYPES.join(', ')}`);
+      }
+      taskType = taskTypeStr as GeminiTaskType;
+    }
+
+    // Using tenantId = 'rpc' for RPC calls
+    const result = await callTextProvider(text, this.env.GEMINI_API_KEY, 'rpc', taskType);
+    return result.embedding;
+  }
+}
+
+export default EmbeddingWorker;
