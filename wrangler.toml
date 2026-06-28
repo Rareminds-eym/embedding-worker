@@ -1,87 +1,32 @@
 name = "embedding-worker"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
+compatibility_date = "2026-06-08"
 compatibility_flags = ["nodejs_compat"]
 
 [dev]
 port = 9004
-inspector_port = 9230
+inspector_port = 9231
 
 [observability]
 enabled = true
 
-# ============================================================================
-# LOCAL  →  wrangler dev  (uses preview_id for KV, secrets from .dev.vars)
-# ============================================================================
 [ai]
 binding = "AI"
 
 [vars]
-ENVIRONMENT = "local"
-ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788"
+ENVIRONMENT = "production"
+ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,http://localhost:9004,http://127.0.0.1:8788,http://127.0.0.1:9004,https://*.rareminds.in,https://*.pages.dev"
 
 [[kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"
-preview_id = "REPLACE_WITH_LOCAL_KV_ID"
+id = "3cf92ef89a5b43bb9d420169cd68df22"
+
+[[unsafe.bindings]]
+name         = "RATE_LIMITER"
+type         = "ratelimit"
+namespace_id = "1004"
+simple       = { limit = 120, period = 60 }
 
 # wrangler secret put ADMIN_KEY
-# wrangler secret put VOYAGE_API_KEY
-# wrangler secret put OPENAI_API_KEY
-
-# ============================================================================
-# DEVELOPMENT  →  wrangler deploy --env dev
-# ============================================================================
-[env.dev]
-[env.dev.ai]
-binding = "AI"
-
-[env.dev.vars]
-ENVIRONMENT = "development"
-ALLOWED_ORIGINS = "https://dev.skillpassports.com"
-
-[[env.dev.kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_DEV_KV_ID"
-
-# wrangler secret put ADMIN_KEY      --env dev
-# wrangler secret put VOYAGE_API_KEY --env dev
-# wrangler secret put OPENAI_API_KEY --env dev
-
-# ============================================================================
-# STAGING  →  wrangler deploy --env staging
-# ============================================================================
-[env.staging]
-[env.staging.ai]
-binding = "AI"
-
-[env.staging.vars]
-ENVIRONMENT = "staging"
-ALLOWED_ORIGINS = "https://stag.skillpassports.com"
-
-[[env.staging.kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_STAGING_KV_ID"
-
-# wrangler secret put ADMIN_KEY      --env staging
-# wrangler secret put VOYAGE_API_KEY --env staging
-# wrangler secret put OPENAI_API_KEY --env staging
-
-# ============================================================================
-# PRODUCTION  →  wrangler deploy --env production
-# ============================================================================
-[env.production]
-[env.production.ai]
-binding = "AI"
-
-[env.production.vars]
-ENVIRONMENT = "production"
-ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
-
-[[env.production.kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"
-
-# wrangler secret put ADMIN_KEY      --env production
-# wrangler secret put VOYAGE_API_KEY --env production
-# wrangler secret put OPENAI_API_KEY --env production
+# wrangler secret put GEMINI_API_KEY
+# ⚠️ EMBEDDING_KV id above is a placeholder — replace with production KV namespace id before deploying

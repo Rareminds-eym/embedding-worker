@@ -3,19 +3,20 @@
 import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { resolveDocModel, callDocProvider, VOYAGE } from '../providers';
+import { callPdfProvider, callDocProvider, GEMINI_MODEL_ID } from '../providers';
 import {
   MAX_DOC_REQUEST_BODY_SIZE,
   MAX_DOC_BINARY_SIZE,
+  MAX_MARKDOWN_CHARS,
   ALLOWED_DOC_TYPES,
   DOC_CHUNK_SIZE,
   DOC_CHUNK_OVERLAP,
   DOC_MAX_CHUNKS,
   DOC_MAX_PAGES,
   DOC_CHARS_PER_PAGE,
-  DOC_MIN_CONTENT_CHARS,
   ERROR_CODES,
 } from '../constants';
+import { checkRateLimit } from '../utils/ratelimit';
 import type { AllowedDocMimeType } from '../constants';
 
 function limitToPages(markdown: string, maxPages: number): { text: string; pagesDetected: number; pagesProcessed: number } {
@@ -44,18 +45,23 @@ function chunkText(text: string): string[] {
     const end = start + DOC_CHUNK_SIZE;
     let slice = text.slice(start, end);
 
-    // Try to break at a paragraph boundary, but only in the second half of the slice
     if (end < text.length) {
       const lastBreak = slice.lastIndexOf('\n\n');
       if (lastBreak > DOC_CHUNK_SIZE / 2) slice = slice.slice(0, lastBreak);
     }
-
     const trimmed = slice.trim();
-    if (trimmed.length > 0) chunks.push(trimmed);
 
-    // Always advance by DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP regardless of paragraph trimming,
-    // so overlap is consistent and we never stall on a short trimmed slice.
-    const advance = DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP;
+    if (trimmed.length === 0) {
+      // Entire slice was whitespace — skip forward without adding a chunk.
+      start += Math.ceil(DOC_CHUNK_SIZE / 4);
+      continue;
+    }
+
+    chunks.push(trimmed);
+
+    if (start + slice.length >= text.length) break;
+
+    const advance = Math.max(slice.length - DOC_CHUNK_OVERLAP, Math.ceil(DOC_CHUNK_SIZE / 4));
     start += advance;
   }
 
@@ -67,9 +73,12 @@ export async function handleDocEmbed(
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
-  const bodyText = await request.text().catch(() => '');
+  const bodyText = await request.text().catch((err) => {
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'doc', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+    throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
+  });
   if (bodyText.length > MAX_DOC_REQUEST_BODY_SIZE) {
-    throw new ValidationError('Request body too large', ERROR_CODES.INVALID_INPUT);
+    throw new ValidationError(`Actual body size ${bodyText.length} exceeds limit ${MAX_DOC_REQUEST_BODY_SIZE}`, ERROR_CODES.INVALID_INPUT);
   }
 
   const body = (() => {
@@ -81,10 +90,9 @@ export async function handleDocEmbed(
     throw new ValidationError('Missing required field: input', ERROR_CODES.INVALID_INPUT);
   }
 
-  const modelKey = typeof body.model === 'string' ? body.model : undefined;
-  if (modelKey && !VOYAGE.textModelKeys.includes(modelKey)) {
+  if (typeof body.model === 'string') {
     throw new ValidationError(
-      `Invalid model. Must be one of: ${VOYAGE.textModelKeys.join(', ')}`,
+      `model parameter is not supported. Document embeddings always use ${GEMINI_MODEL_ID}.`,
       ERROR_CODES.INVALID_INPUT
     );
   }
@@ -105,7 +113,7 @@ export async function handleDocEmbed(
   const mimeType = input.mimeType as string;
   if (!mimeType || !Object.prototype.hasOwnProperty.call(ALLOWED_DOC_TYPES, mimeType)) {
     throw new ValidationError(
-      `input.mimeType must be one of: ${Object.keys(ALLOWED_DOC_TYPES).join(', ')}`,
+      `input.mimeType "${mimeType}" must be one of: ${Object.keys(ALLOWED_DOC_TYPES).join(', ')}`,
       ERROR_CODES.INVALID_INPUT
     );
   }
@@ -114,10 +122,18 @@ export async function handleDocEmbed(
     throw new ValidationError('input.data must be a non-empty base64 string', ERROR_CODES.INVALID_INPUT);
   }
 
+  const MAX_BASE64_LEN = Math.ceil(MAX_DOC_BINARY_SIZE * 4 / 3) + 4;
+  if (input.data.length > MAX_BASE64_LEN) {
+    throw new ValidationError('input.data exceeds maximum encoded size', ERROR_CODES.INVALID_INPUT);
+  }
+
+  await checkRateLimit(ctx.tenantId, 'doc', env);
+
   const docType = ALLOWED_DOC_TYPES[mimeType as AllowedDocMimeType];
-  const filename = typeof input.filename === 'string' && input.filename.trim().length > 0
+  const rawFilename = typeof input.filename === 'string' && input.filename.trim().length > 0
     ? input.filename.trim()
     : `document.${docType.ext}`;
+  const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 255);
 
   let binaryData: Uint8Array;
   try {
@@ -128,13 +144,41 @@ export async function handleDocEmbed(
 
   if (binaryData.length > MAX_DOC_BINARY_SIZE) {
     throw new ValidationError(
-      `Document binary size ${(binaryData.length / 1_000_000).toFixed(1)}MB exceeds maximum of ${MAX_DOC_BINARY_SIZE / 1_000_000}MB. Use max_pages to reduce scope or split the document.`,
+      `Document binary size ${(binaryData.length / 1_000_000).toFixed(1)}MB exceeds maximum of ${MAX_DOC_BINARY_SIZE / 1_000_000}MB.`,
       ERROR_CODES.INVALID_INPUT
     );
   }
 
+  if (mimeType === 'application/pdf') {
+    if (maxPages !== undefined) {
+      throw new ValidationError(
+        `max_pages is not supported for PDF inputs. Gemini processes the full PDF natively (up to 6 pages). Split the document if you need to limit scope.`,
+        ERROR_CODES.INVALID_INPUT
+      );
+    }
+
+    const embedding = await callPdfProvider(input.data, env.GEMINI_API_KEY, ctx.tenantId);
+
+    const latency_ms = Date.now() - ctx.startTime;
+    console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'pdf-native', tenant_id: ctx.tenantId, latency_ms, model: GEMINI_MODEL_ID }));
+
+    return jsonOk({
+      success: true,
+      embeddings: [{ index: 0, embedding, dimensions: embedding.length }] as EmbeddingItem[],
+      model: GEMINI_MODEL_ID,
+      document: {
+        filename,
+        mimeType,
+        type: docType.label,
+        chunks: 1,
+      },
+      request_id: ctx.requestId,
+      latency_ms,
+    }, 200, request, env, ctx.requestId);
+  }
+
   const blob = new Blob([binaryData], { type: mimeType });
-  let conversionResult: { name: string; format: string; data?: string; error?: string };
+  let conversionResult: { name: string; format: string; data?: string; error?: string } | undefined;
 
   try {
     const results = await env.AI.toMarkdown(
@@ -142,22 +186,34 @@ export async function handleDocEmbed(
       { conversionOptions: { pdf: { metadata: false } } }
     );
     const item = Array.isArray(results) ? results[0] : results;
-    conversionResult = item;
+    if (!item || typeof item !== 'object') {
+      throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
+    }
+    const record = item as Record<string, unknown>;
+    const { name, format, data: itemData, error: itemError } = record;
+    if (typeof name !== 'string' || typeof format !== 'string') {
+      throw new WorkerError('Missing required fields in conversion response', ERROR_CODES.INTERNAL_ERROR, 500);
+    }
+    if (format !== 'error' && typeof itemData !== 'string') {
+      throw new WorkerError('Unexpected response shape from document conversion', ERROR_CODES.INTERNAL_ERROR, 500);
+    }
+    conversionResult = {
+      name,
+      format,
+      data: typeof itemData === 'string' ? itemData : undefined,
+      error: typeof itemError === 'string' ? itemError : undefined,
+    };
   } catch (err) {
     if (err instanceof WorkerError || err instanceof ValidationError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const isTimeout = /timeout|timed out/i.test(msg);
-    console.error(JSON.stringify({ event: 'toMarkdown.error', tenant_id: ctx.tenantId, filename, mimeType, error: msg }));
+    console.error(JSON.stringify({ event: 'toMarkdown.error', tenant_id: ctx.tenantId, filename, mimeType, binary_size: binaryData.length, request_id: ctx.requestId, error: msg }));
     throw new WorkerError(
-      isTimeout
-        ? 'Document conversion timed out. The file may be too large or complex.'
-        : 'Document conversion failed. The file may be corrupted or unsupported.',
+      isTimeout ? 'Document conversion timed out. The file may be too large or complex.' : 'Document conversion failed. The file may be corrupted or unsupported.',
       ERROR_CODES.INTERNAL_ERROR,
       isTimeout ? 504 : 500
     );
   }
-
-  if (!conversionResult) throw new WorkerError('Document conversion returned no result', ERROR_CODES.INTERNAL_ERROR, 500);
 
   if (conversionResult.format === 'error' || !conversionResult.data) {
     if (conversionResult.error) {
@@ -172,26 +228,20 @@ export async function handleDocEmbed(
   const markdown = conversionResult.data.trim();
 
   if (markdown.length === 0) {
-    throw new ValidationError(
-      'Document produced no extractable text. This PDF appears to be image-only (scanned). Use /embeddings/image to embed individual page images instead.',
-      ERROR_CODES.INVALID_INPUT
-    );
+    throw new ValidationError('Document produced no extractable text.', ERROR_CODES.INVALID_INPUT);
   }
 
-  if (mimeType === 'application/pdf' && markdown.length < DOC_MIN_CONTENT_CHARS) {
-    throw new ValidationError(
-      `Document produced only ${markdown.length} characters of text. This PDF may be image-only or scanned. Use /embeddings/image to embed individual page images instead.`,
-      ERROR_CODES.INVALID_INPUT
-    );
+  if (markdown.length > MAX_MARKDOWN_CHARS) {
+    throw new ValidationError('Document expanded beyond safe limits (possible compression bomb)', ERROR_CODES.INVALID_INPUT);
   }
 
   let processedMarkdown = markdown;
   let pagesDetected: number | undefined;
   let pagesProcessed: number | undefined;
 
-  const maxProcessableChars = DOC_MAX_CHUNKS * (DOC_CHUNK_SIZE - DOC_CHUNK_OVERLAP);
+  const minAdvancePerChunk = Math.ceil(DOC_CHUNK_SIZE / 4);
+  const maxProcessableChars = DOC_MAX_CHUNKS * minAdvancePerChunk;
 
-  // Early rejection when no page limit is set — avoids allocating limitToPages on oversized docs
   if (maxPages === undefined && markdown.length > maxProcessableChars) {
     throw new ValidationError(
       `Document too large: ${markdown.length} chars exceeds maximum of ${maxProcessableChars}. Split the document and send in parts.`,
@@ -215,23 +265,16 @@ export async function handleDocEmbed(
       ERROR_CODES.INVALID_INPUT
     );
   }
+
   const chunks = chunkText(processedMarkdown);
   if (chunks.length === 0) {
     throw new ValidationError('Document produced no embeddable chunks', ERROR_CODES.INVALID_INPUT);
   }
 
-  if (env.ENVIRONMENT !== 'production') {
-    console.debug(`[doc-embed] tenant=${ctx.tenantId} req=${ctx.requestId} chars=${processedMarkdown.length} chunks=${chunks.length}${maxPages !== undefined ? ` max_pages=${maxPages}` : ''}`);
-  }
-
-  const modelConfig = resolveDocModel(modelKey);
-  const result = await callDocProvider(chunks, modelConfig.id, env.VOYAGE_API_KEY, env.OPENAI_API_KEY, ctx.tenantId);
-  const totalTokens = result.total_tokens;
-  const actualModel = result._model;
-  const actualCostPer1M = result._provider === 'openai' ? 0.02 : modelConfig.costPer1M;
-  const estimatedCost = ((totalTokens / 1_000_000) * actualCostPer1M).toFixed(6);
+  const result = await callDocProvider(chunks, env.GEMINI_API_KEY, ctx.tenantId);
 
   const latency_ms = Date.now() - ctx.startTime;
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', tenant_id: ctx.tenantId, latency_ms, model: GEMINI_MODEL_ID, chunks: chunks.length }));
 
   return jsonOk({
     success: true,
@@ -240,8 +283,7 @@ export async function handleDocEmbed(
       embedding: item.embedding,
       dimensions: item.embedding.length,
     })),
-    model: actualModel,
-    ...(result._provider !== 'voyage' && { fallback_provider: result._provider }),
+    model: GEMINI_MODEL_ID,
     document: {
       filename,
       mimeType,
@@ -252,11 +294,7 @@ export async function handleDocEmbed(
       chunk_overlap: DOC_CHUNK_OVERLAP,
       ...(pagesDetected !== undefined && { pages_detected: pagesDetected, pages_processed: pagesProcessed }),
     },
-    usage: {
-      total_tokens: totalTokens,
-      estimated_cost_usd: estimatedCost,
-    },
     request_id: ctx.requestId,
     latency_ms,
-  }, 200, request, env);
+  }, 200, request, env, ctx.requestId);
 }

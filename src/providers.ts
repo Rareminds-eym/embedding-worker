@@ -1,345 +1,307 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import { ProviderError, RateLimitError } from './types';
-import { VOYAGE_TIMEOUT_MS, RETRY_DELAY_MS, MAX_RETRIES, DOC_BATCH_SIZE } from './constants';
+import {
+  RETRY_DELAY_MS,
+  MAX_RETRIES,
+  DOC_BATCH_SIZE,
+  MAX_DOC_BATCH_CONCURRENCY,
+  PROVIDER_TOTAL_DEADLINE_MS,
+  PROVIDER_MIN_TIMEOUT_MS,
+  PROVIDER_DEFAULT_RETRY_MS,
+} from './constants';
 
-export interface ModelConfig {
-  id: string;
-  dimensions: number;
-  costPer1M: number;
-}
+const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+const GEMINI_MODEL = 'gemini-embedding-2-preview';
+const GEMINI_AUTH_HEADER = 'x-goog-api-key';
+export const GEMINI_TIMEOUT_MS = 30_000;
+const GEMINI_OUTPUT_DIM = 3072;
+const GEMINI_ERROR_PREVIEW = 200;
 
-export interface ProviderConfig {
-  name: string;
-  textEndpoint: string;
-  imageEndpoint: string;
-  models: Record<string, ModelConfig>;
-  defaultTextModel: string;
-  defaultDocModel: string;
-  defaultImageModel: string;
-  textModelKeys: string[];
-  imageModelKeys: string[];
-}
+export const GEMINI_MODEL_ID = GEMINI_MODEL;
+export const GEMINI_DIMENSIONS = GEMINI_OUTPUT_DIM;
 
-export const VOYAGE: ProviderConfig = {
-  name: 'voyage',
-  textEndpoint:  'https://api.voyageai.com/v1/embeddings',
-  imageEndpoint: 'https://api.voyageai.com/v1/multimodalembeddings',
-  defaultTextModel:  'voyage-4',
-  defaultDocModel:   'voyage-4',
-  defaultImageModel: 'voyage-multimodal-3.5',
-  textModelKeys:  ['voyage-4', 'voyage-4-lite', 'voyage-4-large'],
-  imageModelKeys: ['voyage-multimodal-3.5', 'voyage-multimodal-3'],
-  models: {
-    'voyage-4':              { id: 'voyage-4',              dimensions: 1024, costPer1M: 0.06 },
-    'voyage-4-lite':         { id: 'voyage-4-lite',         dimensions: 1024, costPer1M: 0.02 },
-    'voyage-4-large':        { id: 'voyage-4-large',        dimensions: 1024, costPer1M: 0.12 },
-    'voyage-multimodal-3.5': { id: 'voyage-multimodal-3.5', dimensions: 1024, costPer1M: 0.12 },
-    'voyage-multimodal-3':   { id: 'voyage-multimodal-3',   dimensions: 1024, costPer1M: 0.12 },
-  },
-};
+export const GEMINI_TASK_TYPES = [
+  'RETRIEVAL_DOCUMENT',
+  'RETRIEVAL_QUERY',
+  'SEMANTIC_SIMILARITY',
+  'CLASSIFICATION',
+  'CLUSTERING',
+  'QUESTION_ANSWERING',
+  'FACT_VERIFICATION',
+  'CODE_RETRIEVAL_QUERY',
+] as const;
 
-// OpenAI via OpenRouter fallback — text/doc only, no image support
-export const OPENAI = {
-  name: 'openai',
-  textEndpoint: 'https://openrouter.ai/api/v1/embeddings',
-  defaultModel: 'openai/text-embedding-3-small',
-  model: { id: 'text-embedding-3-small', dimensions: 1536, costPer1M: 0.02 } as ModelConfig,
-};
+export type GeminiTaskType = typeof GEMINI_TASK_TYPES[number];
 
-export function resolveModel(modelKey: string | undefined): ModelConfig {
-  const key = modelKey && VOYAGE.textModelKeys.includes(modelKey) ? modelKey : VOYAGE.defaultTextModel;
-  return VOYAGE.models[key];
-}
-
-export function resolveDocModel(modelKey: string | undefined): ModelConfig {
-  const key = modelKey && VOYAGE.textModelKeys.includes(modelKey) ? modelKey : VOYAGE.defaultDocModel;
-  return VOYAGE.models[key];
-}
-
-export function resolveImageModel(modelKey: string | undefined): ModelConfig {
-  const key = modelKey && VOYAGE.imageModelKeys.includes(modelKey) ? modelKey : VOYAGE.defaultImageModel;
-  return VOYAGE.models[key];
-}
+export const GEMINI_DEFAULT_TASK_TYPE: GeminiTaskType = 'RETRIEVAL_DOCUMENT';
 
 export interface TextProviderResponse {
-  data: { embedding: number[] }[];
-  usage: { total_tokens: number };
-  // actual model used — may differ from requested if fallback was triggered
-  _model: string;
-  _provider: string;
+  embedding: number[];
 }
 
 export interface DocProviderResponse {
   embeddings: { index: number; embedding: number[] }[];
-  total_tokens: number;
-  _model: string;
-  _provider: string;
 }
 
-export interface ImageProviderResponse {
-  data: { embedding: number[]; index: number }[];
-  usage: { total_tokens: number };
-}
-
-export interface VoyageImageContent {
-  type: 'image_url' | 'image_base64' | 'text';
-  image_url?: string;
-  image_base64?: string;
+interface GeminiPart {
   text?: string;
+  inline_data?: { mime_type: string; data: string };
 }
 
-export interface VoyageRequestItem {
-  content: VoyageImageContent[];
+interface GeminiEmbedRequest {
+  content: { parts: GeminiPart[] };
+  taskType?: string;
+  output_dimensionality?: number;
 }
 
-// ─── Voyage shared retry loop ────────────────────────────────────────────────
+interface GeminiEmbedResponse {
+  embedding: { values: number[] };
+}
 
-async function callVoyageEndpoint<T>(
-  endpoint: string,
+interface GeminiBatchRequest {
+  requests: Array<{ model: string } & GeminiEmbedRequest>;
+}
+
+interface GeminiBatchResponse {
+  embeddings: Array<{ values: number[] }>;
+}
+
+function isGeminiEmbedResponse(json: unknown): json is GeminiEmbedResponse {
+  if (!json || typeof json !== 'object') return false;
+  const j = json as Record<string, unknown>;
+  if (!j.embedding || typeof j.embedding !== 'object') return false;
+  const emb = j.embedding as Record<string, unknown>;
+  return Array.isArray(emb.values) && emb.values.length > 0;
+}
+
+function isGeminiBatchResponse(json: unknown, expectedCount: number): json is GeminiBatchResponse {
+  if (!json || typeof json !== 'object') return false;
+  const j = json as Record<string, unknown>;
+  return Array.isArray(j.embeddings) && j.embeddings.length === expectedCount;
+}
+
+interface RetryContext {
+  endpoint: string;
+  tenantId: string;
+}
+
+async function callWithRetry<T>(
+  url: string,
+  // Accept a pre-built Headers object so the API key is never stored in any
+  // plain object that could be accidentally serialized into logs.
+  headers: Headers,
   body: object,
-  validate: (json: unknown, inputLength: number) => T,
-  inputLength: number,
-  endpointName: string,
-  apiKey: string,
-  tenantId: string,
-  model: string,
-  extraLogFields?: Record<string, unknown>,
+  validate: (json: unknown) => T,
+  ctx: RetryContext,
 ): Promise<T> {
-  let attempt = 0;
+  const deadline = Date.now() + PROVIDER_TOTAL_DEADLINE_MS;
 
-  while (true) {
-    let res: Response;
-    try {
-      res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
-      });
-    } catch (err) {
-      if (attempt < MAX_RETRIES) {
-        await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
-        attempt++;
-        continue;
-      }
-      throw new ProviderError(`${endpointName} provider unreachable`, 502);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new ProviderError(`${ctx.endpoint} timeout (deadline exceeded)`, 502);
+    }
+    if (remainingMs < PROVIDER_MIN_TIMEOUT_MS) {
+      throw new ProviderError(`${ctx.endpoint} timeout (${remainingMs}ms remaining)`, 502);
     }
 
-    if (res.status === 429 && attempt < MAX_RETRIES) {
-      const retryAfterHeader = res.headers.get('Retry-After');
-      const retryAfterSeconds = Number(retryAfterHeader);
-      const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-        ? retryAfterSeconds * 1000
-        : retryAfterHeader
-          ? Math.max(0, Date.parse(retryAfterHeader) - Date.now())
-          : 2000;
-      await new Promise(r => setTimeout(r, retryAfterMs));
-      attempt++;
-      continue;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: new Headers(headers),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(Math.max(PROVIDER_MIN_TIMEOUT_MS, Math.min(GEMINI_TIMEOUT_MS, remainingMs))),
+      });
+    } catch (err) {
+      console.error(JSON.stringify({ event: 'provider.request_failed', endpoint: ctx.endpoint, tenant_id: ctx.tenantId, attempt: attempt + 1, error: err instanceof Error ? err.message : String(err) }));
+      if (attempt < MAX_RETRIES) {
+        const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt), 30_000);
+        if (Date.now() + delay > deadline) throw new ProviderError(`${ctx.endpoint} timeout after ${attempt + 1} attempts`, 502);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw new ProviderError(`${ctx.endpoint} unreachable: ${err instanceof Error ? err.message : String(err)}`, 502);
     }
 
     if (res.status === 429) {
-      const retryAfterHeader = res.headers.get('Retry-After');
-      const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
-      console.error(JSON.stringify({ event: 'provider.rate_limit', provider: VOYAGE.name, endpoint: endpointName, tenant_id: tenantId, model, retry_after: retryAfterSeconds, ...extraLogFields }));
+      const retryAfterSeconds = parseRetryAfter(res.headers.get('Retry-After'));
+      if (attempt < MAX_RETRIES) {
+        const retryMs = retryAfterSeconds ? retryAfterSeconds * 1000 : PROVIDER_DEFAULT_RETRY_MS;
+        if (Date.now() + retryMs > deadline) throw new RateLimitError('Rate limit exceeded. Please wait before retrying.', retryAfterSeconds);
+        await new Promise(r => setTimeout(r, retryMs));
+        continue;
+      }
+      console.error(JSON.stringify({ event: 'provider.rate_limit', endpoint: ctx.endpoint, tenant_id: ctx.tenantId }));
       throw new RateLimitError(
-        `Rate limit exceeded. ${Number.isFinite(retryAfterSeconds) ? `Retry after ${retryAfterSeconds}s.` : 'Please wait before retrying.'}`,
+        retryAfterSeconds ? `Rate limit exceeded. Retry after ${retryAfterSeconds}s.` : 'Rate limit exceeded. Please wait before retrying.',
         retryAfterSeconds,
       );
     }
 
     if (res.status >= 500 && attempt < MAX_RETRIES) {
-      await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
-      attempt++;
+      const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt), 30_000);
+      if (Date.now() + delay > deadline) throw new ProviderError(`${ctx.endpoint} error (${res.status})`, res.status);
+      await new Promise(r => setTimeout(r, delay));
       continue;
     }
 
     if (!res.ok) {
-      console.error(JSON.stringify({ event: 'provider.error', provider: VOYAGE.name, endpoint: endpointName, status: res.status, tenant_id: tenantId, model, ...extraLogFields }));
-      throw new ProviderError(`${endpointName} provider error (${res.status})`, res.status);
+      const body = await res.text().catch(() => '');
+      console.error(JSON.stringify({ event: 'provider.error', endpoint: ctx.endpoint, status: res.status, tenant_id: ctx.tenantId, response_preview: body.slice(0, GEMINI_ERROR_PREVIEW) }));
+      throw new ProviderError(`${ctx.endpoint} error (${res.status})`, res.status);
     }
 
-    return validate(await res.json(), inputLength);
-  }
-}
-
-// ─── OpenAI fallback ─────────────────────────────────────────────────────────
-
-// OpenAI uses the same /v1/embeddings shape as Voyage for text
-async function callOpenAIEmbeddings(
-  inputs: string[],
-  apiKey: string,
-  tenantId: string,
-  endpointName: string,
-): Promise<{ data: { embedding: number[] }[]; usage: { total_tokens: number } }> {
-  let attempt = 0;
-
-  while (true) {
-    let res: Response;
     try {
-      res = await fetch(OPENAI.textEndpoint, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: OPENAI.defaultModel, input: inputs }),
-        signal: AbortSignal.timeout(VOYAGE_TIMEOUT_MS),
-      });
+      const json = await res.json();
+      return validate(json);
     } catch (err) {
-      if (attempt < MAX_RETRIES) {
-        await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
-        attempt++;
-        continue;
+      if (err instanceof ProviderError || err instanceof RateLimitError) throw err;
+      if (err instanceof SyntaxError || err instanceof TypeError) {
+        throw new ProviderError(`${ctx.endpoint} returned invalid JSON`, 502);
       }
-      throw new ProviderError(`openai fallback unreachable`, 502);
+      console.error(JSON.stringify({ event: 'provider.invalid_response', endpoint: ctx.endpoint, tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+      throw new ProviderError(`${ctx.endpoint} returned an invalid response`, 502);
     }
-
-    if (res.status >= 500 && attempt < MAX_RETRIES) {
-      await new Promise(r => setTimeout(r, RETRY_DELAY_MS * Math.pow(2, attempt)));
-      attempt++;
-      continue;
-    }
-
-    if (!res.ok) {
-      console.error(JSON.stringify({ event: 'provider.error', provider: OPENAI.name, endpoint: endpointName, status: res.status, tenant_id: tenantId, model: OPENAI.defaultModel }));
-      throw new ProviderError(`openai fallback error (${res.status})`, res.status);
-    }
-
-    // OpenAI response: { data: [{ embedding, index }], usage: { prompt_tokens, total_tokens } }
-    const json = await res.json() as { data: { embedding: number[]; index: number }[]; usage: { prompt_tokens: number; total_tokens: number } };
-    if (!json?.data || !Array.isArray(json.data) || json.data.length === 0) {
-      throw new ProviderError('Invalid response from openai fallback', 502);
-    }
-    // Sort by index to guarantee order matches input order (OpenAI may return out-of-order)
-    const sorted = [...json.data].sort((a, b) => a.index - b.index);
-    return {
-      data: sorted.map(d => ({ embedding: d.embedding })),
-      usage: { total_tokens: json.usage?.total_tokens ?? 0 },
-    };
   }
+
+  throw new ProviderError(`${ctx.endpoint} unreachable`, 502);
 }
 
-// ─── Public provider functions ───────────────────────────────────────────────
-
-export async function callTextProvider(
-  inputs: string[],
-  model: string,
-  voyageApiKey: string,
-  openaiApiKey: string,
-  tenantId: string,
-): Promise<TextProviderResponse> {
-  try {
-    const res = await callVoyageEndpoint<{ data: { embedding: number[] }[]; usage: { total_tokens: number } }>(
-      VOYAGE.textEndpoint,
-      { model, input: inputs },
-      (json) => {
-        const j = json as TextProviderResponse;
-        if (!j?.data || !Array.isArray(j.data) || j.data.length === 0) {
-          console.error(JSON.stringify({ event: 'provider.invalid_response', provider: VOYAGE.name, endpoint: 'text', tenant_id: tenantId, model }));
-          throw new ProviderError('Invalid response from embedding provider', 502);
-        }
-        return j;
-      },
-      inputs.length, 'text', voyageApiKey, tenantId, model,
-    );
-    return { ...res, _model: model, _provider: VOYAGE.name };
-  } catch (err) {
-    if ((err instanceof RateLimitError || err instanceof ProviderError) && openaiApiKey) {
-      console.error(JSON.stringify({ event: 'provider.fallback', from: VOYAGE.name, to: OPENAI.name, endpoint: 'text', tenant_id: tenantId, reason: err.message }));
-      const res = await callOpenAIEmbeddings(inputs, openaiApiKey, tenantId, 'text');
-      return { ...res, _model: OPENAI.defaultModel, _provider: OPENAI.name };
-    }
-    throw err;
+function parseRetryAfter(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds > 0 && seconds <= 3600) return seconds;
+  const retryAt = Date.parse(header);
+  if (!Number.isNaN(retryAt)) {
+    const delta = Math.ceil((retryAt - Date.now()) / 1000);
+    return (delta > 0 && delta <= 3600) ? delta : undefined;
   }
+  return undefined;
 }
 
-export async function callImageProvider(
-  inputs: VoyageRequestItem[],
-  model: string,
+function embedEndpoint(): string {
+  return `${GEMINI_API_BASE}/${GEMINI_MODEL}:embedContent`;
+}
+
+function batchEmbedEndpoint(): string {
+  return `${GEMINI_API_BASE}/${GEMINI_MODEL}:batchEmbedContents`;
+}
+
+async function callEmbedContent(
+  parts: GeminiPart[],
   apiKey: string,
   tenantId: string,
-): Promise<ImageProviderResponse> {
-  return callVoyageEndpoint<ImageProviderResponse>(
-    VOYAGE.imageEndpoint,
-    { model, inputs },
-    (json, inputLength) => {
-      const j = json as ImageProviderResponse;
-      if (!j?.data || !Array.isArray(j.data) || j.data.length === 0) {
-        console.error(JSON.stringify({ event: 'provider.invalid_response', provider: VOYAGE.name, endpoint: 'image', tenant_id: tenantId, model }));
-        throw new ProviderError('Invalid response from image embedding provider', 502);
-      }
-      if (j.data.length !== inputLength) {
-        console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'image', tenant_id: tenantId, model, expected: inputLength, received: j.data.length }));
-        throw new ProviderError('Partial response from image embedding provider', 502);
-      }
-      return j;
+  endpoint: string,
+  taskType?: string,
+): Promise<number[]> {
+  const body: GeminiEmbedRequest = { content: { parts }, output_dimensionality: GEMINI_OUTPUT_DIM };
+  if (taskType) body.taskType = taskType;
+
+  const headers = new Headers({ 'Content-Type': 'application/json', [GEMINI_AUTH_HEADER]: apiKey });
+
+  return callWithRetry(
+    embedEndpoint(),
+    headers,
+    body,
+    (json) => {
+      if (!isGeminiEmbedResponse(json)) throw new ProviderError(`${endpoint} returned invalid response`, 502);
+      return json.embedding.values;
     },
-    inputs.length, 'image', apiKey, tenantId, model,
+    { endpoint, tenantId },
   );
 }
 
-async function callDocBatch(
-  batch: string[],
-  batchStart: number,
-  model: string,
-  voyageApiKey: string,
-  openaiApiKey: string,
+async function callBatchEmbedContents(
+  texts: string[],
+  apiKey: string,
   tenantId: string,
-): Promise<{ embeddings: { index: number; embedding: number[] }[]; total_tokens: number; _model: string; _provider: string }> {
-  try {
-    const res = await callVoyageEndpoint<{ data: { embedding: number[] }[]; usage: { total_tokens: number } }>(
-      VOYAGE.textEndpoint,
-      { model, input: batch },
-      (json, inputLength) => {
-        const j = json as { data: { embedding: number[] }[]; usage: { total_tokens: number } };
-        if (!j?.data || !Array.isArray(j.data) || j.data.length === 0) {
-          throw new ProviderError('Invalid response from embedding provider', 502);
+  taskType: string,
+  batchOffset = 0,
+): Promise<number[][]> {
+  if (texts.length === 0) throw new ProviderError('batch: empty input', 400);
+  if (texts.length > 100) throw new ProviderError(`batch: size ${texts.length} exceeds maximum of 100`, 400);
+
+  const body: GeminiBatchRequest = {
+    requests: texts.map(text => ({
+      model: `models/${GEMINI_MODEL}`,
+      content: { parts: [{ text }] },
+      taskType,
+      output_dimensionality: GEMINI_OUTPUT_DIM,
+    })),
+  };
+
+  const endpointLabel = `batch[${batchOffset}-${batchOffset + texts.length - 1}]`;
+
+  const headers = new Headers({ 'Content-Type': 'application/json', [GEMINI_AUTH_HEADER]: apiKey });
+
+  return callWithRetry(
+    batchEmbedEndpoint(),
+    headers,
+    body,
+    (json) => {
+      if (!isGeminiBatchResponse(json, texts.length)) {
+        const actual = Array.isArray((json as Record<string, unknown>)?.embeddings)
+          ? ((json as Record<string, unknown>).embeddings as unknown[]).length
+          : 'unknown';
+        throw new ProviderError(`${endpointLabel} returned ${actual} embeddings, expected ${texts.length}`, 502);
+      }
+      return json.embeddings.map((e, i) => {
+        if (!e?.values || !Array.isArray(e.values) || e.values.length === 0) {
+          throw new ProviderError(`${endpointLabel} missing embedding at chunk index ${batchOffset + i}`, 502);
         }
-        if (j.data.length !== inputLength) {
-          console.error(JSON.stringify({ event: 'provider.partial_response', provider: VOYAGE.name, endpoint: 'doc', tenant_id: tenantId, model, expected: inputLength, received: j.data.length, batch_start: batchStart }));
-          throw new ProviderError('Partial response from embedding provider', 502);
-        }
-        return j;
-      },
-      batch.length, 'doc', voyageApiKey, tenantId, model, { batch_start: batchStart },
-    );
-    return {
-      embeddings: res.data.map((item, j) => ({ index: batchStart + j, embedding: item.embedding })),
-      total_tokens: res.usage?.total_tokens ?? 0,
-      _model: model,
-      _provider: VOYAGE.name,
-    };
-  } catch (err) {
-    if ((err instanceof RateLimitError || err instanceof ProviderError) && openaiApiKey) {
-      console.error(JSON.stringify({ event: 'provider.fallback', from: VOYAGE.name, to: OPENAI.name, endpoint: 'doc', tenant_id: tenantId, batch_start: batchStart, reason: err.message }));
-      const res = await callOpenAIEmbeddings(batch, openaiApiKey, tenantId, 'doc');
-      return {
-        embeddings: res.data.map((item, j) => ({ index: batchStart + j, embedding: item.embedding })),
-        total_tokens: res.usage?.total_tokens ?? 0,
-        _model: OPENAI.defaultModel,
-        _provider: OPENAI.name,
-      };
-    }
-    throw err;
-  }
+        return e.values;
+      });
+    },
+    { endpoint: endpointLabel, tenantId },
+  );
+}
+
+export async function callTextProvider(
+  input: string,
+  apiKey: string,
+  tenantId: string,
+  taskType: string = GEMINI_DEFAULT_TASK_TYPE,
+): Promise<TextProviderResponse> {
+  const embedding = await callEmbedContent([{ text: input }], apiKey, tenantId, 'text', taskType);
+  return { embedding };
+}
+
+export async function callImageProvider(
+  image: { mime_type: string; data: string },
+  apiKey: string,
+  tenantId: string,
+): Promise<number[]> {
+  return callEmbedContent([{ inline_data: image }], apiKey, tenantId, 'image');
+}
+
+export async function callPdfProvider(
+  pdfBase64: string,
+  apiKey: string,
+  tenantId: string,
+): Promise<number[]> {
+  return callEmbedContent([{ inline_data: { mime_type: 'application/pdf', data: pdfBase64 } }], apiKey, tenantId, 'pdf');
 }
 
 export async function callDocProvider(
   chunks: string[],
-  model: string,
-  voyageApiKey: string,
-  openaiApiKey: string,
+  apiKey: string,
   tenantId: string,
 ): Promise<DocProviderResponse> {
-  const result: DocProviderResponse = { embeddings: [], total_tokens: 0, _model: model, _provider: VOYAGE.name };
+  const result: DocProviderResponse = {
+    embeddings: Array.from({ length: chunks.length }, (_, i) => ({ index: i, embedding: [] as number[] })),
+  };
 
-  for (let i = 0; i < chunks.length; i += DOC_BATCH_SIZE) {
-    const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-    const { embeddings, total_tokens, _model, _provider } = await callDocBatch(batch, i, model, voyageApiKey, openaiApiKey, tenantId);
-    result.embeddings.push(...embeddings);
-    result.total_tokens += total_tokens;
-    // Track if any batch fell back — last batch wins for reporting
-    result._model = _model;
-    result._provider = _provider;
+  const batchStarts: number[] = [];
+  for (let i = 0; i < chunks.length; i += DOC_BATCH_SIZE) batchStarts.push(i);
+
+  for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
+    await Promise.all(batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY).map(async (i) => {
+      const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
+      const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI_DEFAULT_TASK_TYPE, i);
+      embeddings.forEach((embedding, j) => { result.embeddings[i + j] = { index: i + j, embedding }; });
+    }));
   }
 
   return result;
