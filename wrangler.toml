@@ -10,107 +10,23 @@ inspector_port = 9231
 [observability]
 enabled = true
 
-# ============================================================================
-# LOCAL  →  wrangler dev  (uses preview_id for KV, secrets from .dev.vars)
-# ============================================================================
 [ai]
 binding = "AI"
 
 [vars]
-ENVIRONMENT = "local"
-ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788"
-
-[[kv_namespaces]]
-binding    = "EMBEDDING_KV"
-id         = "3cf92ef89a5b43bb9d420169cd68df22"      # local dev — replace with your actual local KV namespace ID
-preview_id = "3cf92ef89a5b43bb9d420169cd68df22"      # used by wrangler dev; same as id for local
-
-# Native rate limiting — counters are cached per Cloudflare location and updated
-# asynchronously. namespace_id is a positive integer you choose. period must be 10 or 60.
-# The key passed at runtime is tenantId:endpoint.
-[[unsafe.bindings]]
-name         = "RATE_LIMITER"
-type         = "ratelimit"
-namespace_id = "1001"
-simple       = { limit = 120, period = 60 }
-
-# KV key schema:
-#   tenant:<id>                        → TenantConfig JSON
-#   api_keys:<sha256>                  → ApiKeyRecord JSON
-#   tenant_keys:<tenantId>:<sha256>    → "1" (reverse index for tenant key deletion)
-#   delete:tenant:<id>                 → deletion-in-progress flag (TTL 300s)
-
-# wrangler secret put ADMIN_KEY
-# wrangler secret put GEMINI_API_KEY
-
-# ============================================================================
-# DEVELOPMENT  →  wrangler deploy --env dev
-# ============================================================================
-[env.dev]
-[env.dev.ai]
-binding = "AI"
-
-[env.dev.vars]
-ENVIRONMENT = "dev"
-ALLOWED_ORIGINS = "https://dev.skillpassports.com"
-
-[[env.dev.kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "8faee86f16cc49989fd17063d15c8929"
-
-[[env.dev.unsafe.bindings]]
-name         = "RATE_LIMITER"
-type         = "ratelimit"
-namespace_id = "1002"
-simple       = { limit = 120, period = 60 }
-
-# wrangler secret put ADMIN_KEY      --env dev
-# wrangler secret put GEMINI_API_KEY --env dev
-
-# ============================================================================
-# STAGING  →  wrangler deploy --env staging
-# ============================================================================
-[env.staging]
-[env.staging.ai]
-binding = "AI"
-
-[env.staging.vars]
-ENVIRONMENT = "staging"
-ALLOWED_ORIGINS = "https://stag.skillpassports.com"
-
-[[env.staging.kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "87fb2ee71c094bf58302e46da00c0f7e"
-
-[[env.staging.unsafe.bindings]]
-name         = "RATE_LIMITER"
-type         = "ratelimit"
-namespace_id = "1003"
-simple       = { limit = 120, period = 60 }
-
-# wrangler secret put ADMIN_KEY      --env staging
-# wrangler secret put GEMINI_API_KEY --env staging
-
-# ============================================================================
-# PRODUCTION  →  wrangler deploy --env production
-# ============================================================================
-[env.production]
-[env.production.ai]
-binding = "AI"
-
-[env.production.vars]
 ENVIRONMENT = "production"
 ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
 
-[[env.production.kv_namespaces]]
+[[kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "3cf92ef89a5b43bb9d420169cd68df22"  # ⚠️ Must be replaced before deployment
+id = "3cf92ef89a5b43bb9d420169cd68df22"
 
-[[env.production.unsafe.bindings]]
+[[unsafe.bindings]]
 name         = "RATE_LIMITER"
 type         = "ratelimit"
 namespace_id = "1004"
 simple       = { limit = 120, period = 60 }
 
-# wrangler secret put ADMIN_KEY      --env production
-# wrangler secret put GEMINI_API_KEY --env production
+# wrangler secret put ADMIN_KEY
+# wrangler secret put GEMINI_API_KEY
+# ⚠️ EMBEDDING_KV id above is a placeholder — replace with production KV namespace id before deploying
