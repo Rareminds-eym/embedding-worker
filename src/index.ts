@@ -1,11 +1,11 @@
 /// <reference types="@cloudflare/workers-types" />
 
 import type { Env } from './types';
-import { authenticate, authenticateAdmin } from './auth';
+import { EmbeddingService } from './entrypoint';
+import { authenticate } from './auth';
 import { handleTextEmbed } from './handlers/text';
 import { handleImageEmbed } from './handlers/image';
 import { handleDocEmbed } from './handlers/doc';
-import { handleAdmin } from './admin';
 import { generateRequestId, getCorsHeaders, jsonOk, jsonError, handleError, validateCorsOrigins } from './utils/response';
 import { API_VERSION, ERROR_CODES } from './constants';
 
@@ -18,8 +18,8 @@ function runStartupValidation(env: Env): string | null {
     }
   }
 
-  if (!env.ADMIN_KEY || env.ADMIN_KEY.length < 32) {
-    return 'ADMIN_KEY is missing or too weak (min 32 chars)';
+  if (!env.EMBEDDING_API_KEY || env.EMBEDDING_API_KEY.length < 32) {
+    return 'EMBEDDING_API_KEY is missing or too weak (min 32 chars)';
   }
 
   if (env.ENVIRONMENT !== 'local' && !env.RATE_LIMITER) {
@@ -39,15 +39,12 @@ function getCachedConfigError(env: Env): string | null {
   return _cachedConfigError;
 }
 
-import { WorkerEntrypoint } from 'cloudflare:workers';
-import { normalizeInput } from './handlers/text';
-import { callTextProvider, GEMINI_DEFAULT_TASK_TYPE, type GeminiTaskType, GEMINI_TASK_TYPES } from './providers';
-import { TEXT_MAX_CHARS } from './constants';
-
-
-export class EmbeddingWorker extends WorkerEntrypoint<Env> {
-  async fetch(request: Request): Promise<Response> {
-    const env = this.env;
+/**
+ * HTTP request router. Serves external callers over HTTPS: /health, /admin/*,
+ * and the Bearer-authenticated /embeddings/* endpoints. Internal worker-to-worker
+ * callers should prefer the typed RPC methods on {@link EmbeddingService}.
+ */
+async function handleHttpRequest(request: Request, env: Env): Promise<Response> {
     // Accept a client-supplied request ID only if it passes strict validation.
     // The value is regex-gated before use, so it is safe to echo in logs and
     // response headers. Always generate a fresh UUID if the header is absent or invalid.
@@ -84,11 +81,6 @@ export class EmbeddingWorker extends WorkerEntrypoint<Env> {
         }, kvHealthy ? 200 : 503, request, env);
       }
 
-      if (pathname.startsWith('/admin/')) {
-        await authenticateAdmin(request, env);
-        return await handleAdmin(request, env);
-      }
-
       if (pathname.startsWith('/embeddings/')) {
         if (!env.GEMINI_API_KEY) {
           console.error(JSON.stringify({ event: 'misconfigured', reason: 'GEMINI_API_KEY not set', request_id: requestId }));
@@ -121,36 +113,16 @@ export class EmbeddingWorker extends WorkerEntrypoint<Env> {
     } catch (err) {
       return handleError(err, requestId, request, env);
     }
-  }
-
-  // === True RPC Methods ===
-  
-  async getEmbedding(input: unknown, taskTypeStr?: string): Promise<number[]> {
-    if (!this.env.GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY not set");
-    }
-
-    const { text, truncated } = normalizeInput(input);
-
-    if (text.length === 0) {
-      throw new Error('Input cannot be empty');
-    }
-    if (truncated || text.length > TEXT_MAX_CHARS) {
-      throw new Error(`Input exceeds maximum of ${TEXT_MAX_CHARS} characters. Truncate or summarize your input.`);
-    }
-
-    let taskType: GeminiTaskType = GEMINI_DEFAULT_TASK_TYPE;
-    if (taskTypeStr) {
-      if (!(GEMINI_TASK_TYPES as readonly string[]).includes(taskTypeStr)) {
-        throw new Error(`Invalid task_type. Must be one of: ${GEMINI_TASK_TYPES.join(', ')}`);
-      }
-      taskType = taskTypeStr as GeminiTaskType;
-    }
-
-    // Using tenantId = 'rpc' for RPC calls
-    const result = await callTextProvider(text, this.env.GEMINI_API_KEY, 'rpc', taskType);
-    return result.embedding;
-  }
 }
 
-export default EmbeddingWorker;
+// Attach the HTTP router to the entrypoint prototype so a single deployed worker
+// serves both RPC (service bindings) and HTTP (external clients). On a
+// WorkerEntrypoint, fetch receives only the Request; env/ctx are on `this`.
+EmbeddingService.prototype.fetch = function (request: Request): Promise<Response> {
+  return handleHttpRequest(request, this.env);
+};
+
+// Named export required by the consumer's service binding (`entrypoint = "EmbeddingService"`);
+// the default export serves as the worker's HTTP/default handler.
+export { EmbeddingService };
+export default EmbeddingService;

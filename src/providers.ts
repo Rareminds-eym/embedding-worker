@@ -15,7 +15,7 @@ const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models
 const GEMINI_MODEL = 'gemini-embedding-2-preview';
 const GEMINI_AUTH_HEADER = 'x-goog-api-key';
 export const GEMINI_TIMEOUT_MS = 30_000;
-const GEMINI_OUTPUT_DIM = 3072;
+const GEMINI_OUTPUT_DIM = 1536;
 const GEMINI_ERROR_PREVIEW = 200;
 
 export const GEMINI_MODEL_ID = GEMINI_MODEL;
@@ -83,7 +83,7 @@ function isGeminiBatchResponse(json: unknown, expectedCount: number): json is Ge
 
 interface RetryContext {
   endpoint: string;
-  tenantId: string;
+  callerId: string;
 }
 
 async function callWithRetry<T>(
@@ -115,7 +115,7 @@ async function callWithRetry<T>(
         signal: AbortSignal.timeout(Math.max(PROVIDER_MIN_TIMEOUT_MS, Math.min(GEMINI_TIMEOUT_MS, remainingMs))),
       });
     } catch (err) {
-      console.error(JSON.stringify({ event: 'provider.request_failed', endpoint: ctx.endpoint, tenant_id: ctx.tenantId, attempt: attempt + 1, error: err instanceof Error ? err.message : String(err) }));
+      console.error(JSON.stringify({ event: 'provider.request_failed', endpoint: ctx.endpoint, caller_id: ctx.callerId, attempt: attempt + 1, error: err instanceof Error ? err.message : String(err) }));
       if (attempt < MAX_RETRIES) {
         const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt), 30_000);
         if (Date.now() + delay > deadline) throw new ProviderError(`${ctx.endpoint} timeout after ${attempt + 1} attempts`, 502);
@@ -133,7 +133,7 @@ async function callWithRetry<T>(
         await new Promise(r => setTimeout(r, retryMs));
         continue;
       }
-      console.error(JSON.stringify({ event: 'provider.rate_limit', endpoint: ctx.endpoint, tenant_id: ctx.tenantId }));
+      console.error(JSON.stringify({ event: 'provider.rate_limit', endpoint: ctx.endpoint, caller_id: ctx.callerId }));
       throw new RateLimitError(
         retryAfterSeconds ? `Rate limit exceeded. Retry after ${retryAfterSeconds}s.` : 'Rate limit exceeded. Please wait before retrying.',
         retryAfterSeconds,
@@ -149,7 +149,7 @@ async function callWithRetry<T>(
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      console.error(JSON.stringify({ event: 'provider.error', endpoint: ctx.endpoint, status: res.status, tenant_id: ctx.tenantId, response_preview: body.slice(0, GEMINI_ERROR_PREVIEW) }));
+      console.error(JSON.stringify({ event: 'provider.error', endpoint: ctx.endpoint, status: res.status, caller_id: ctx.callerId, response_preview: body.slice(0, GEMINI_ERROR_PREVIEW) }));
       throw new ProviderError(`${ctx.endpoint} error (${res.status})`, res.status);
     }
 
@@ -161,7 +161,7 @@ async function callWithRetry<T>(
       if (err instanceof SyntaxError || err instanceof TypeError) {
         throw new ProviderError(`${ctx.endpoint} returned invalid JSON`, 502);
       }
-      console.error(JSON.stringify({ event: 'provider.invalid_response', endpoint: ctx.endpoint, tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+      console.error(JSON.stringify({ event: 'provider.invalid_response', endpoint: ctx.endpoint, caller_id: ctx.callerId, error: err instanceof Error ? err.message : String(err) }));
       throw new ProviderError(`${ctx.endpoint} returned an invalid response`, 502);
     }
   }
@@ -192,7 +192,7 @@ function batchEmbedEndpoint(): string {
 async function callEmbedContent(
   parts: GeminiPart[],
   apiKey: string,
-  tenantId: string,
+  callerId: string,
   endpoint: string,
   taskType?: string,
 ): Promise<number[]> {
@@ -209,14 +209,14 @@ async function callEmbedContent(
       if (!isGeminiEmbedResponse(json)) throw new ProviderError(`${endpoint} returned invalid response`, 502);
       return json.embedding.values;
     },
-    { endpoint, tenantId },
+    { endpoint, callerId },
   );
 }
 
 async function callBatchEmbedContents(
   texts: string[],
   apiKey: string,
-  tenantId: string,
+  callerId: string,
   taskType: string,
   batchOffset = 0,
 ): Promise<number[][]> {
@@ -254,40 +254,40 @@ async function callBatchEmbedContents(
         return e.values;
       });
     },
-    { endpoint: endpointLabel, tenantId },
+    { endpoint: endpointLabel, callerId },
   );
 }
 
 export async function callTextProvider(
   input: string,
   apiKey: string,
-  tenantId: string,
+  callerId: string,
   taskType: string = GEMINI_DEFAULT_TASK_TYPE,
 ): Promise<TextProviderResponse> {
-  const embedding = await callEmbedContent([{ text: input }], apiKey, tenantId, 'text', taskType);
+  const embedding = await callEmbedContent([{ text: input }], apiKey, callerId, 'text', taskType);
   return { embedding };
 }
 
 export async function callImageProvider(
   image: { mime_type: string; data: string },
   apiKey: string,
-  tenantId: string,
+  callerId: string,
 ): Promise<number[]> {
-  return callEmbedContent([{ inline_data: image }], apiKey, tenantId, 'image');
+  return callEmbedContent([{ inline_data: image }], apiKey, callerId, 'image');
 }
 
 export async function callPdfProvider(
   pdfBase64: string,
   apiKey: string,
-  tenantId: string,
+  callerId: string,
 ): Promise<number[]> {
-  return callEmbedContent([{ inline_data: { mime_type: 'application/pdf', data: pdfBase64 } }], apiKey, tenantId, 'pdf');
+  return callEmbedContent([{ inline_data: { mime_type: 'application/pdf', data: pdfBase64 } }], apiKey, callerId, 'pdf');
 }
 
 export async function callDocProvider(
   chunks: string[],
   apiKey: string,
-  tenantId: string,
+  callerId: string,
 ): Promise<DocProviderResponse> {
   const result: DocProviderResponse = {
     embeddings: Array.from({ length: chunks.length }, (_, i) => ({ index: i, embedding: [] as number[] })),
@@ -299,7 +299,7 @@ export async function callDocProvider(
   for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
     await Promise.all(batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY).map(async (i) => {
       const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-      const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI_DEFAULT_TASK_TYPE, i);
+      const embeddings = await callBatchEmbedContents(batch, apiKey, callerId, GEMINI_DEFAULT_TASK_TYPE, i);
       embeddings.forEach((embedding, j) => { result.embeddings[i + j] = { index: i + j, embedding }; });
     }));
   }

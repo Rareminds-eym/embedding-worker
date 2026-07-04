@@ -122,13 +122,119 @@ export function normalizeInput(input: unknown): { text: string; truncated: boole
   return { text, truncated: budget.truncated };
 }
 
+/**
+ * Resolve and validate a task_type value.
+ *
+ * @param value - Raw task_type. `undefined` means the caller omitted it.
+ * @returns A validated GeminiTaskType, defaulting to RETRIEVAL_DOCUMENT.
+ * @throws ValidationError when a present value is not a recognized task type.
+ */
+function resolveTaskType(value: unknown): GeminiTaskType {
+  if (value === undefined) return GEMINI_DEFAULT_TASK_TYPE;
+  if (typeof value !== 'string' || !(GEMINI_TASK_TYPES as readonly string[]).includes(value)) {
+    throw new ValidationError(
+      `Invalid task_type. Must be one of: ${GEMINI_TASK_TYPES.join(', ')}`,
+      ERROR_CODES.INVALID_INPUT
+    );
+  }
+  return value as GeminiTaskType;
+}
+
+/**
+ * Result of generating a text embedding. Transport-agnostic: returned directly
+ * by the RPC entrypoint and wrapped into an HTTP envelope by {@link handleTextEmbed}.
+ */
+export interface TextEmbedResult {
+  embedding: number[];
+  model: string;
+  dimensions: number;
+  task_type: GeminiTaskType;
+}
+
+/**
+ * Core text-embedding logic shared by the HTTP handler and the RPC entrypoint.
+ *
+ * Performs input normalization, validation, rate limiting, and the provider
+ * call. Knows nothing about Request/Response — callers adapt the result to
+ * their transport.
+ *
+ * @param input - String, object, or array of either. Arrays are joined into a
+ *   single embedding.
+ * @param taskType - Optional task type; pass undefined for the default.
+ * @param env - Worker environment bindings.
+ * @param callerId - Identifier used for rate-limit bucketing and logging
+ *   (`http` for HTTP callers, `rpc` for service bindings).
+ * @returns The embedding vector plus model metadata.
+ * @throws ValidationError on invalid/empty/oversized input or task_type.
+ * @throws WorkerError when GEMINI_API_KEY is not configured.
+ * @throws RateLimitError when the caller exceeds its quota.
+ * @throws ProviderError when the upstream provider fails after retries.
+ */
+export async function embedTextCore(
+  input: unknown,
+  taskType: string | undefined,
+  env: Env,
+  callerId: string
+): Promise<TextEmbedResult> {
+  if (!env.GEMINI_API_KEY) {
+    throw new WorkerError('Service misconfigured: GEMINI_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
+  }
+
+  const resolvedTaskType = resolveTaskType(taskType);
+
+  let normalized: unknown = input;
+  if (Array.isArray(input)) {
+    if (input.length === 0) {
+      throw new ValidationError('Input array must not be empty', ERROR_CODES.INVALID_INPUT);
+    }
+    const parts = (input as unknown[])
+      .map(item => normalizeInput(item).text)
+      .filter(Boolean);
+    const joined = parts.join(' ');
+    if (joined.length === 0) {
+      throw new ValidationError('Input array produced no embeddable text', ERROR_CODES.INVALID_INPUT);
+    }
+    if (joined.length > TEXT_MAX_CHARS) {
+      throw new ValidationError(
+        `Combined input exceeds maximum of ${TEXT_MAX_CHARS} characters. Truncate or summarize your input.`,
+        ERROR_CODES.INVALID_INPUT
+      );
+    }
+    normalized = joined;
+  }
+
+  const { text, truncated } = normalizeInput(normalized);
+
+  if (text.length === 0) {
+    throw new ValidationError('Input cannot be empty', ERROR_CODES.INVALID_INPUT);
+  }
+  if (truncated || text.length > TEXT_MAX_CHARS) {
+    throw new ValidationError(
+      `Input exceeds maximum of ${TEXT_MAX_CHARS} characters. Truncate or summarize your input.`,
+      ERROR_CODES.INVALID_INPUT
+    );
+  }
+
+  await checkRateLimit(callerId, 'text', env);
+
+  const result = await callTextProvider(text, env.GEMINI_API_KEY, callerId, resolvedTaskType);
+  const embedding = result.embedding;
+
+  return {
+    embedding,
+    model: GEMINI_MODEL_ID,
+    dimensions: embedding.length,
+    task_type: resolvedTaskType,
+  };
+}
+
 export async function handleTextEmbed(
   request: Request,
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
   const bodyText = await request.text().catch((err) => {
-    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'text', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'text', caller_id: ctx.callerId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
   });
   if (bodyText.length > MAX_REQUEST_BODY_SIZE) {
@@ -151,63 +257,21 @@ export async function handleTextEmbed(
     );
   }
 
-  const taskType: GeminiTaskType = (() => {
-    if (!('task_type' in body)) return GEMINI_DEFAULT_TASK_TYPE;
-    if (typeof body.task_type !== 'string' || !(GEMINI_TASK_TYPES as readonly string[]).includes(body.task_type)) {
-      throw new ValidationError(
-        `Invalid task_type. Must be one of: ${GEMINI_TASK_TYPES.join(', ')}`,
-        ERROR_CODES.INVALID_INPUT
-      );
-    }
-    return body.task_type as GeminiTaskType;
-  })();
+  // Preserve HTTP semantics: a present-but-invalid task_type errors, while an
+  // absent one falls back to the default inside embedTextCore.
+  const taskType = 'task_type' in body ? body.task_type : undefined;
 
-  if (Array.isArray(body.input)) {
-    if (body.input.length === 0) {
-      throw new ValidationError('Input array must not be empty', ERROR_CODES.INVALID_INPUT);
-    }
-    const parts = (body.input as unknown[])
-      .map(item => normalizeInput(item).text)
-      .filter(Boolean);
-    const joined = parts.join(' ');
-    if (joined.length === 0) {
-      throw new ValidationError('Input array produced no embeddable text', ERROR_CODES.INVALID_INPUT);
-    }
-    if (joined.length > TEXT_MAX_CHARS) {
-      throw new ValidationError(
-        `Combined input exceeds maximum of ${TEXT_MAX_CHARS} characters. Truncate or summarize your input.`,
-        ERROR_CODES.INVALID_INPUT
-      );
-    }
-    body.input = joined;
-  }
-
-  const { text, truncated } = normalizeInput(body.input);
-
-  if (text.length === 0) {
-    throw new ValidationError('Input cannot be empty', ERROR_CODES.INVALID_INPUT);
-  }
-  if (truncated || text.length > TEXT_MAX_CHARS) {
-    throw new ValidationError(
-      `Input exceeds maximum of ${TEXT_MAX_CHARS} characters. Truncate or summarize your input.`,
-      ERROR_CODES.INVALID_INPUT
-    );
-  }
-
-  await checkRateLimit(ctx.tenantId, 'text', env);
-
-  const result = await callTextProvider(text, env.GEMINI_API_KEY, ctx.tenantId, taskType);
-  const embedding = result.embedding;
+  const result = await embedTextCore(body.input, taskType as string | undefined, env, ctx.callerId);
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', tenant_id: ctx.tenantId, latency_ms, model: GEMINI_MODEL_ID }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'text', caller_id: ctx.callerId, latency_ms, model: result.model }));
 
   return jsonOk({
     success: true,
-    embedding,
-    model: GEMINI_MODEL_ID,
-    dimensions: embedding.length,
-    task_type: taskType,
+    embedding: result.embedding,
+    model: result.model,
+    dimensions: result.dimensions,
+    task_type: result.task_type,
     request_id: ctx.requestId,
     latency_ms,
   }, 200, request, env, ctx.requestId);
