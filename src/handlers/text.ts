@@ -115,7 +115,7 @@ function extractText(
   return '';
 }
 
-function normalizeInput(input: unknown): { text: string; truncated: boolean } {
+export function normalizeInput(input: unknown): { text: string; truncated: boolean } {
   if (typeof input === 'string') return { text: input.trim(), truncated: false };
   const budget = { left: TEXT_MAX_CHARS, truncated: false };
   const text = extractText(input, undefined, 0, budget).replace(/\s+/g, ' ').trim();
