@@ -24,16 +24,16 @@ function limitToPages(markdown: string, maxPages: number): { text: string; pages
   if (formFeeds.length > 1) {
     const pagesDetected = formFeeds.length;
     return {
-      text: formFeeds.slice(0, maxPages).join('\f'),
+      text: formFeeds.slice(0, maxPages + 1).join('\f'),
       pagesDetected,
-      pagesProcessed: Math.min(maxPages, pagesDetected),
+      pagesProcessed: Math.min(maxPages + 1, pagesDetected),
     };
   }
   const estimatedPages = Math.ceil(markdown.length / DOC_CHARS_PER_PAGE);
   return {
-    text: markdown.slice(0, maxPages * DOC_CHARS_PER_PAGE),
+    text: markdown.slice(0, (maxPages + 1) * DOC_CHARS_PER_PAGE),
     pagesDetected: estimatedPages,
-    pagesProcessed: Math.min(maxPages, estimatedPages),
+    pagesProcessed: Math.min(maxPages + 1, estimatedPages),
   };
 }
 

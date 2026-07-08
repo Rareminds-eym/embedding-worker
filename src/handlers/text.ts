@@ -116,7 +116,7 @@ function extractText(
 }
 
 export function normalizeInput(input: unknown): { text: string; truncated: boolean } {
-  if (typeof input === 'string') return { text: input.trim(), truncated: false };
+  if (typeof input === 'string') return { text: input.trim().slice(0, TEXT_MAX_CHARS), truncated: false };
   const budget = { left: TEXT_MAX_CHARS, truncated: false };
   const text = extractText(input, undefined, 0, budget).replace(/\s+/g, ' ').trim();
   return { text, truncated: budget.truncated };
@@ -185,7 +185,7 @@ export async function embedTextCore(
   let normalized: unknown = input;
   if (Array.isArray(input)) {
     if (input.length === 0) {
-      throw new ValidationError('Input array must not be empty', ERROR_CODES.INVALID_INPUT);
+      return { embedding: [], model: GEMINI_MODEL_ID, dimensions: 0, task_type: resolvedTaskType };
     }
     const parts = (input as unknown[])
       .map(item => normalizeInput(item).text)
@@ -200,7 +200,7 @@ export async function embedTextCore(
         ERROR_CODES.INVALID_INPUT
       );
     }
-    normalized = joined;
+
   }
 
   const { text, truncated } = normalizeInput(normalized);

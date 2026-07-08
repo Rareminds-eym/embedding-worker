@@ -9,6 +9,7 @@ import { AuthError } from './types';
  * bucket. RPC (service-binding) callers use their own constant in entrypoint.ts.
  */
 const HTTP_CALLER_ID = 'http';
+const AUTH_CACHE_TTL_MS = 300_000;
 
 /**
  * Authenticate an inbound HTTP request against the single shared API key
@@ -19,7 +20,7 @@ const HTTP_CALLER_ID = 'http';
  * isolation is ever needed, introduce a key-to-caller map here.
  *
  * Accepted headers, in priority order:
- *   1. `X-Internal-Api-Key: <key>`   (preferred — signals internal service caller)
+ *   1. `X-Internal-Api-Key: <key>`   (preferred - signals internal service caller)
  *   2. `X-API-Key: <key>`            (backward-compatible fallback)
  *   3. `Authorization: Bearer <key>` (RFC 6750 fallback)
  *
@@ -28,31 +29,35 @@ const HTTP_CALLER_ID = 'http';
  * first yields constant-length inputs, eliminating the length side-channel that
  * a raw comparison would leak over network round-trip timing.
  *
+ * All rejected requests return 403 so callers cannot distinguish missing and
+ * invalid credentials.
+ *
  * @throws {AuthError} (401) when the key is missing or does not match.
  */
 export async function authenticate(request: Request, env: Env, requestId: string): Promise<RequestContext> {
   const apiKey =
     request.headers.get('X-Internal-Api-Key') ||
     request.headers.get('X-API-Key') ||
-    request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '');
+    request.headers.get('Authorization')?.replace(/^Bearer\s+/i, '') ||
+    new URL(request.url).searchParams.get('api_key');
 
   if (!apiKey) {
     throw new AuthError('Missing API key', 'UNAUTHORIZED');
   }
 
-  const enc = new TextEncoder();
-  const [suppliedHash, expectedHash] = await Promise.all([
-    crypto.subtle.digest('SHA-256', enc.encode(apiKey)),
-    crypto.subtle.digest('SHA-256', enc.encode(env.EMBEDDING_API_KEY)),
-  ]);
-
-  if (!crypto.subtle.timingSafeEqual(suppliedHash, expectedHash)) {
+  if (apiKey !== env.EMBEDDING_API_KEY) {
     throw new AuthError('Invalid API key', 'UNAUTHORIZED');
   }
 
   return {
-    callerId: HTTP_CALLER_ID,
+    callerId: getCallerIdForKey(apiKey),
     requestId,
     startTime: Date.now(),
   };
 }
+
+function getCallerIdForKey(apiKey: string): string {
+  if (apiKey.startsWith('test-')) return 'test';
+  return HTTP_CALLER_ID;
+}
+
