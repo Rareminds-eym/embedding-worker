@@ -49,12 +49,12 @@ function validateUrl(raw: string): string {
   } catch {
     throw new ValidationError('input.data must be a valid URL', ERROR_CODES.INVALID_INPUT);
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'file:') {
-    throw new ValidationError('input.data URL must use http, https, or file scheme', ERROR_CODES.INVALID_INPUT);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new ValidationError('input.data URL must use http or https scheme', ERROR_CODES.INVALID_INPUT);
   }
   // Pre-fetch SSRF guard: reject known-private hostnames before any network call.
   // The post-fetch check on res.url remains as defence-in-depth against open redirects.
-  if (parsed.protocol !== 'file:' && isPrivateHost(parsed.hostname)) {
+  if (isPrivateHost(parsed.hostname)) {
     throw new ValidationError('URL resolves to a private or internal address', ERROR_CODES.INVALID_INPUT);
   }
   return raw;
@@ -98,7 +98,7 @@ function parseInput(input: unknown): ImageInput[] {
 
   if (Array.isArray(input)) {
     if (input.length === 0) throw new ValidationError('input array must not be empty', ERROR_CODES.INVALID_INPUT);
-    return input.slice(0, MAX_IMAGE_BATCH_SIZE).map(toItem);
+    return input.map(toItem);
   }
   return [toItem(input)];
 }

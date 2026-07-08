@@ -49,8 +49,6 @@ export function getCorsHeaders(request: Request, env?: Env): Record<string, stri
     headers['Vary'] = 'Origin';
     if (allowedOrigins.includes(origin)) {
       headers['Access-Control-Allow-Origin'] = origin;
-    } else {
-      headers['Access-Control-Allow-Origin'] = origin;
     }
   }
   return headers;
@@ -150,7 +148,7 @@ export function handleError(err: unknown, requestId: string, request?: Request, 
     }));
   }
   return new Response(
-    JSON.stringify({ success: false, errorCode: ERROR_CODES.INTERNAL_ERROR, message: err instanceof Error ? err.message : 'Internal server error', stack: err instanceof Error ? err.stack : undefined, request_id: requestId }),
+    JSON.stringify({ success: false, errorCode: ERROR_CODES.INTERNAL_ERROR, message: 'Internal server error', request_id: requestId }),
     { status: 500, headers }
   );
 }

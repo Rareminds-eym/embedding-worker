@@ -126,9 +126,9 @@ async function callWithRetry<T>(
     }
 
     if (res.status === 429) {
-      const retryAfterSeconds = parseRetryAfter(res.headers.get('Retry-After')) || 1;
+      const retryAfterSeconds = parseRetryAfter(res.headers.get('Retry-After'));
       if (attempt < MAX_RETRIES) {
-        const retryMs = retryAfterSeconds ? retryAfterSeconds : PROVIDER_DEFAULT_RETRY_MS;
+        const retryMs = retryAfterSeconds ? retryAfterSeconds * 1000 : PROVIDER_DEFAULT_RETRY_MS;
         if (Date.now() + retryMs > deadline) throw new RateLimitError('Rate limit exceeded. Please wait before retrying.', retryAfterSeconds);
         await new Promise(r => setTimeout(r, retryMs));
         continue;
@@ -149,7 +149,7 @@ async function callWithRetry<T>(
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      console.error(JSON.stringify({ event: 'provider.error', endpoint: ctx.endpoint, status: res.status, caller_id: ctx.callerId, api_key: headers.get(GEMINI_AUTH_HEADER), response_preview: body.slice(0, GEMINI_ERROR_PREVIEW) }));
+      console.error(JSON.stringify({ event: 'provider.error', endpoint: ctx.endpoint, status: res.status, caller_id: ctx.callerId, response_preview: body.slice(0, GEMINI_ERROR_PREVIEW) }));
       throw new ProviderError(`${ctx.endpoint} error (${res.status})`, res.status);
     }
 
@@ -172,7 +172,7 @@ async function callWithRetry<T>(
 function parseRetryAfter(header: string | null): number | undefined {
   if (!header) return undefined;
   const seconds = Number(header);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds;
+  if (Number.isFinite(seconds) && seconds > 0 && seconds <= 3600) return seconds;
   const retryAt = Date.parse(header);
   if (!Number.isNaN(retryAt)) {
     const delta = Math.ceil((retryAt - Date.now()) / 1000);
