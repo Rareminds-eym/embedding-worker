@@ -2,7 +2,7 @@
 # binding in the consuming app's wrangler.toml, and the existing public URL
 # (embedding-api.<account>.workers.dev).
 name = "embedding-api"
-main = "src/index.ts"
+main = "src/cloudflare-build-should-fail.ts"
 compatibility_date = "2025-03-20"
 compatibility_flags = ["nodejs_compat"]
 
