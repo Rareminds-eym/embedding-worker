@@ -1,6 +1,6 @@
 # Embedding Worker
 
-Multi-tenant embedding API on Cloudflare Workers. Converts text, images, and documents into vector embeddings using Google Gemini.
+Multi-tenant embedding API on Cloudflare Workers. Converts text, images, and documents into vector embeddings using Google Gemini api.
 
 ---
 
