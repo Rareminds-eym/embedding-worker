@@ -217,7 +217,7 @@ export async function embedTextCore(
 
   await checkRateLimit(callerId, 'text', env);
 
-  const result = await callTextProvider(text, env.OPENROUTER_API_KEY, callerId, resolvedTaskType);
+  const result = await callTextProvider(text, env.OPENROUTER_API_KEY, callerId, resolvedTaskType, env.ALLOWED_ORIGINS);
   const embedding = result.embedding;
 
   return {

@@ -219,7 +219,7 @@ export async function embedImageCore(
     const batch = await Promise.all(
       resolved.slice(offset, offset + IMAGE_EMBED_CONCURRENCY).map(async ({ mime_type, data }, j) => {
         const i = offset + j;
-        const embedding = await callImageProvider({ mime_type, data }, env.OPENROUTER_API_KEY, callerId);
+        const embedding = await callImageProvider({ mime_type, data }, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS);
         return { index: i, embedding, dimensions: embedding.length };
       })
     );

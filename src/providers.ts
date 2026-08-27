@@ -176,14 +176,15 @@ function parseRetryAfter(header: string | null): number | undefined {
 }
 
 async function callOpenRouterEmbeddings(
-  input: string | string[] | any[],
+  input: string | string[] | Record<string, unknown>[],
   apiKey: string,
   callerId: string,
   endpointLabel: string,
   taskType?: string,
+  allowedOrigins?: string,
 ): Promise<number[][]> {
   const inputType = mapTaskTypeToInputType(taskType);
-  const body: Record<string, any> = {
+  const body: Record<string, unknown> = {
     model: OPENROUTER_MODEL,
     input,
     dimensions: OPENROUTER_OUTPUT_DIM,
@@ -192,10 +193,11 @@ async function callOpenRouterEmbeddings(
     body.input_type = inputType;
   }
 
+  const referer = allowedOrigins?.split(',')[0]?.trim() || 'https://skillpassports.com';
   const headers = new Headers({
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${apiKey}`,
-    'HTTP-Referer': 'https://skillpassports.com',
+    'HTTP-Referer': referer,
     'X-Title': 'SkillPassport Embedding Service',
   });
 
@@ -219,8 +221,9 @@ export async function callTextProvider(
   apiKey: string,
   callerId: string,
   taskType: string = GEMINI_DEFAULT_TASK_TYPE,
+  allowedOrigins?: string,
 ): Promise<TextProviderResponse> {
-  const embeddings = await callOpenRouterEmbeddings(input, apiKey, callerId, 'text', taskType);
+  const embeddings = await callOpenRouterEmbeddings(input, apiKey, callerId, 'text', taskType, allowedOrigins);
   if (embeddings.length === 0) throw new ProviderError('text: no embedding returned', 502);
   return { embedding: embeddings[0] };
 }
@@ -229,6 +232,7 @@ export async function callImageProvider(
   image: { mime_type: string; data: string },
   apiKey: string,
   callerId: string,
+  allowedOrigins?: string,
 ): Promise<number[]> {
   const embeddings = await callOpenRouterEmbeddings(
     [
@@ -242,6 +246,8 @@ export async function callImageProvider(
     apiKey,
     callerId,
     'image',
+    undefined,
+    allowedOrigins,
   );
   if (embeddings.length === 0) throw new ProviderError('image: no embedding returned', 502);
   return embeddings[0];
@@ -251,6 +257,7 @@ export async function callDocProvider(
   chunks: string[],
   apiKey: string,
   callerId: string,
+  allowedOrigins?: string,
 ): Promise<DocProviderResponse> {
   const result: DocProviderResponse = {
     embeddings: Array.from({ length: chunks.length }, (_, i) => ({ index: i, embedding: [] as number[] })),
@@ -262,7 +269,7 @@ export async function callDocProvider(
   for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
     await Promise.all(batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY).map(async (i) => {
       const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-      const embeddings = await callOpenRouterEmbeddings(batch, apiKey, callerId, `batch[${i}-${i + batch.length - 1}]`, GEMINI_DEFAULT_TASK_TYPE);
+      const embeddings = await callOpenRouterEmbeddings(batch, apiKey, callerId, `batch[${i}-${i + batch.length - 1}]`, GEMINI_DEFAULT_TASK_TYPE, allowedOrigins);
       embeddings.forEach((embedding, j) => { result.embeddings[i + j] = { index: i + j, embedding }; });
     }));
   }

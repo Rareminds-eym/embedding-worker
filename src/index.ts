@@ -82,7 +82,6 @@ async function handleHttpRequest(request: Request, env: Env): Promise<Response> 
       }
 
       if (pathname.startsWith('/embeddings/')) {
-        console.log("DEBUG ENV:", JSON.stringify({ keys: Object.keys(env), hasOR: !!env.OPENROUTER_API_KEY, hasGemini: !!(env as any).GEMINI_API_KEY, valueORLength: env.OPENROUTER_API_KEY?.length }));
         if (!env.OPENROUTER_API_KEY) {
           console.error(JSON.stringify({ event: 'misconfigured', reason: 'OPENROUTER_API_KEY not set', request_id: requestId }));
           return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);

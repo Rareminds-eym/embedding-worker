@@ -137,7 +137,7 @@ export async function embedDocCore(
   if (maxPages !== undefined) {
     if (mimeType === 'application/pdf') {
       throw new ValidationError(
-        'max_pages is not supported for PDF inputs. PDF files are processed as a single document flow.',
+        'max_pages is not supported for PDF inputs. PDFs are converted to markdown and processed as text chunks.',
         ERROR_CODES.INVALID_INPUT
       );
     }
@@ -276,7 +276,7 @@ export async function embedDocCore(
     throw new ValidationError('Document produced no embeddable chunks', ERROR_CODES.INVALID_INPUT);
   }
 
-  const providerResult = await callDocProvider(chunks, env.OPENROUTER_API_KEY, callerId);
+  const providerResult = await callDocProvider(chunks, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS);
 
   console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', caller_id: callerId, model: GEMINI_MODEL_ID, chunks: chunks.length }));
 
