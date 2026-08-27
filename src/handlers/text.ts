@@ -176,8 +176,8 @@ export async function embedTextCore(
   env: Env,
   callerId: string
 ): Promise<TextEmbedResult> {
-  if (!env.GEMINI_API_KEY) {
-    throw new WorkerError('Service misconfigured: GEMINI_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
+  if (!env.OPENROUTER_API_KEY) {
+    throw new WorkerError('Service misconfigured: OPENROUTER_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
   }
 
   const resolvedTaskType = resolveTaskType(taskType);
@@ -217,7 +217,7 @@ export async function embedTextCore(
 
   await checkRateLimit(callerId, 'text', env);
 
-  const result = await callTextProvider(text, env.GEMINI_API_KEY, callerId, resolvedTaskType);
+  const result = await callTextProvider(text, env.OPENROUTER_API_KEY, callerId, resolvedTaskType);
   const embedding = result.embedding;
 
   return {

@@ -58,7 +58,7 @@ interface ApiResponse {
 }
 
 const EXPECTED_DIMENSIONS = 1536;
-const EXPECTED_MODEL = 'gemini-embedding-2-preview';
+const EXPECTED_MODEL = 'google/gemini-embedding-2-preview';
 const FETCH_TIMEOUT_MS = 10_000;
 const BASE64_TO_BYTES_RATIO = 0.75;
 const MAX_IMAGE_BATCH_SIZE = 6;

@@ -4,7 +4,7 @@ export interface Env {
   EMBEDDING_KV: KVNamespace;
   /** Single shared API key for all authorized HTTP callers. */
   EMBEDDING_API_KEY: string;
-  GEMINI_API_KEY: string;
+  OPENROUTER_API_KEY: string;
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
   AI: Ai;
