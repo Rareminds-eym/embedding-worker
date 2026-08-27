@@ -180,8 +180,8 @@ async function callOpenRouterEmbeddings(
   apiKey: string,
   callerId: string,
   endpointLabel: string,
+  allowedOrigins: string,
   taskType?: string,
-  allowedOrigins?: string,
 ): Promise<number[][]> {
   const inputType = mapTaskTypeToInputType(taskType);
   const body: Record<string, unknown> = {
@@ -193,7 +193,10 @@ async function callOpenRouterEmbeddings(
     body.input_type = inputType;
   }
 
-  const referer = allowedOrigins?.split(',')[0]?.trim() || 'https://skillpassports.com';
+  const referer = allowedOrigins.split(',')[0]?.trim();
+  if (!referer) {
+    throw new ProviderError('allowedOrigins configuration is required for HTTP-Referer header', 500);
+  }
   const headers = new Headers({
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${apiKey}`,
@@ -220,10 +223,10 @@ export async function callTextProvider(
   input: string,
   apiKey: string,
   callerId: string,
+  allowedOrigins: string,
   taskType: string = GEMINI_DEFAULT_TASK_TYPE,
-  allowedOrigins?: string,
 ): Promise<TextProviderResponse> {
-  const embeddings = await callOpenRouterEmbeddings(input, apiKey, callerId, 'text', taskType, allowedOrigins);
+  const embeddings = await callOpenRouterEmbeddings(input, apiKey, callerId, 'text', allowedOrigins, taskType);
   if (embeddings.length === 0) throw new ProviderError('text: no embedding returned', 502);
   return { embedding: embeddings[0] };
 }
@@ -232,7 +235,7 @@ export async function callImageProvider(
   image: { mime_type: string; data: string },
   apiKey: string,
   callerId: string,
-  allowedOrigins?: string,
+  allowedOrigins: string,
 ): Promise<number[]> {
   const embeddings = await callOpenRouterEmbeddings(
     [
@@ -246,7 +249,6 @@ export async function callImageProvider(
     apiKey,
     callerId,
     'image',
-    undefined,
     allowedOrigins,
   );
   if (embeddings.length === 0) throw new ProviderError('image: no embedding returned', 502);
@@ -257,7 +259,7 @@ export async function callDocProvider(
   chunks: string[],
   apiKey: string,
   callerId: string,
-  allowedOrigins?: string,
+  allowedOrigins: string,
 ): Promise<DocProviderResponse> {
   const result: DocProviderResponse = {
     embeddings: Array.from({ length: chunks.length }, (_, i) => ({ index: i, embedding: [] as number[] })),
@@ -269,9 +271,13 @@ export async function callDocProvider(
   for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
     await Promise.all(batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY).map(async (i) => {
       const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-      const embeddings = await callOpenRouterEmbeddings(batch, apiKey, callerId, `batch[${i}-${i + batch.length - 1}]`, GEMINI_DEFAULT_TASK_TYPE, allowedOrigins);
+      const embeddings = await callOpenRouterEmbeddings(batch, apiKey, callerId, `batch[${i}-${i + batch.length - 1}]`, allowedOrigins, GEMINI_DEFAULT_TASK_TYPE);
       embeddings.forEach((embedding, j) => { result.embeddings[i + j] = { index: i + j, embedding }; });
     }));
+  }
+
+  if (result.embeddings.length === 0) {
+    throw new ProviderError('doc: no embeddings returned', 502);
   }
 
   return result;
