@@ -3,7 +3,7 @@
 import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { callPdfProvider, callDocProvider, GEMINI_MODEL_ID } from '../providers';
+import { callDocProvider, GEMINI_MODEL_ID } from '../providers';
 import {
   MAX_DOC_REQUEST_BODY_SIZE,
   MAX_DOC_BINARY_SIZE,
@@ -117,17 +117,8 @@ export async function embedDocCore(
   env: Env,
   callerId: string
 ): Promise<DocEmbedResult> {
-  if (!env.GEMINI_API_KEY) {
-    throw new WorkerError('Service misconfigured: GEMINI_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
-  }
-
-  if (maxPages !== undefined) {
-    if (!Number.isInteger(maxPages) || maxPages < 1) {
-      throw new ValidationError('max_pages must be a positive integer', ERROR_CODES.INVALID_INPUT);
-    }
-    if (maxPages > DOC_MAX_PAGES) {
-      throw new ValidationError(`max_pages cannot exceed ${DOC_MAX_PAGES}`, ERROR_CODES.INVALID_INPUT);
-    }
+  if (!env.OPENROUTER_API_KEY) {
+    throw new WorkerError('Service misconfigured: OPENROUTER_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
   }
 
   const doc = input as Record<string, unknown>;
@@ -141,6 +132,21 @@ export async function embedDocCore(
       `input.mimeType "${mimeType}" must be one of: ${Object.keys(ALLOWED_DOC_TYPES).join(', ')}`,
       ERROR_CODES.INVALID_INPUT
     );
+  }
+
+  if (maxPages !== undefined) {
+    if (mimeType === 'application/pdf') {
+      throw new ValidationError(
+        'max_pages is not supported for PDF inputs. PDFs are converted to markdown and processed as text chunks.',
+        ERROR_CODES.INVALID_INPUT
+      );
+    }
+    if (!Number.isInteger(maxPages) || maxPages < 1) {
+      throw new ValidationError('max_pages must be a positive integer', ERROR_CODES.INVALID_INPUT);
+    }
+    if (maxPages > DOC_MAX_PAGES) {
+      throw new ValidationError(`max_pages cannot exceed ${DOC_MAX_PAGES}`, ERROR_CODES.INVALID_INPUT);
+    }
   }
 
   if (typeof doc.data !== 'string' || doc.data.trim().length === 0) {
@@ -174,29 +180,7 @@ export async function embedDocCore(
     );
   }
 
-  if (mimeType === 'application/pdf') {
-    if (maxPages !== undefined) {
-      throw new ValidationError(
-        `max_pages is not supported for PDF inputs. Gemini processes the full PDF natively (up to 6 pages). Split the document if you need to limit scope.`,
-        ERROR_CODES.INVALID_INPUT
-      );
-    }
 
-    const embedding = await callPdfProvider(doc.data, env.GEMINI_API_KEY, callerId);
-
-    console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'pdf-native', caller_id: callerId, model: GEMINI_MODEL_ID }));
-
-    return {
-      embeddings: [{ index: 0, embedding, dimensions: embedding.length }],
-      model: GEMINI_MODEL_ID,
-      document: {
-        filename,
-        mimeType,
-        type: docType.label,
-        chunks: 1,
-      },
-    };
-  }
 
   const blob = new Blob([binaryData], { type: mimeType });
   let conversionResult: { name: string; format: string; data?: string; error?: string } | undefined;
@@ -292,7 +276,7 @@ export async function embedDocCore(
     throw new ValidationError('Document produced no embeddable chunks', ERROR_CODES.INVALID_INPUT);
   }
 
-  const providerResult = await callDocProvider(chunks, env.GEMINI_API_KEY, callerId);
+  const providerResult = await callDocProvider(chunks, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS);
 
   console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', caller_id: callerId, model: GEMINI_MODEL_ID, chunks: chunks.length }));
 

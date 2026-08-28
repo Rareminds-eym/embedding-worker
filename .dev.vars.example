@@ -1,4 +1,4 @@
 EMBEDDING_API_KEY=ew-local-api-key-change-me-32chars-min
-GEMINI_API_KEY=replace-with-your-gemini-api-key
+OPENROUTER_API_KEY=replace-with-your-openrouter-api-key
 ENVIRONMENT=local
 ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788

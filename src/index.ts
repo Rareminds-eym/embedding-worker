@@ -82,8 +82,8 @@ async function handleHttpRequest(request: Request, env: Env): Promise<Response> 
       }
 
       if (pathname.startsWith('/embeddings/')) {
-        if (!env.GEMINI_API_KEY) {
-          console.error(JSON.stringify({ event: 'misconfigured', reason: 'GEMINI_API_KEY not set', request_id: requestId }));
+        if (!env.OPENROUTER_API_KEY) {
+          console.error(JSON.stringify({ event: 'misconfigured', reason: 'OPENROUTER_API_KEY not set', request_id: requestId }));
           return jsonError('Service misconfigured', 503, ERROR_CODES.INTERNAL_ERROR, requestId, request, undefined, env);
         }
 

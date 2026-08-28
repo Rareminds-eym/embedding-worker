@@ -176,8 +176,8 @@ export async function embedImageCore(
   env: Env,
   callerId: string
 ): Promise<ImageEmbedResult> {
-  if (!env.GEMINI_API_KEY) {
-    throw new WorkerError('Service misconfigured: GEMINI_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
+  if (!env.OPENROUTER_API_KEY) {
+    throw new WorkerError('Service misconfigured: OPENROUTER_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
   }
 
   const inputs = parseInput(input);
@@ -219,7 +219,7 @@ export async function embedImageCore(
     const batch = await Promise.all(
       resolved.slice(offset, offset + IMAGE_EMBED_CONCURRENCY).map(async ({ mime_type, data }, j) => {
         const i = offset + j;
-        const embedding = await callImageProvider({ mime_type, data }, env.GEMINI_API_KEY, callerId);
+        const embedding = await callImageProvider({ mime_type, data }, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS);
         return { index: i, embedding, dimensions: embedding.length };
       })
     );

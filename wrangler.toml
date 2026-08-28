@@ -20,8 +20,8 @@ enabled = true
 # Cloudflare and needs `wrangler login`. It is only used for PDF→markdown
 # (env.AI.toMarkdown). Disabled locally so `wrangler dev` runs fully local;
 # text/image/doc embeddings go through GEMINI_API_KEY and are unaffected.
-# [ai]
-# binding = "AI"
+[ai]
+binding = "AI"
 
 [vars]
 ENVIRONMENT = "local"
@@ -47,7 +47,7 @@ simple       = { limit = 120, period = 60 }
 #   health:check                       → health probe key
 
 # wrangler secret put EMBEDDING_API_KEY
-# wrangler secret put GEMINI_API_KEY
+# wrangler secret put OPENROUTER_API_KEY
 
 # ============================================================================
 # DEVELOPMENT  →  wrangler deploy --env dev
@@ -65,7 +65,7 @@ binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_DEV_KV_ID"
 
 # wrangler secret put EMBEDDING_API_KEY --env dev
-# wrangler secret put GEMINI_API_KEY --env dev
+# wrangler secret put OPENROUTER_API_KEY --env dev
 
 # ============================================================================
 # STAGING  →  wrangler deploy --env staging
@@ -83,7 +83,7 @@ binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_STAGING_KV_ID"
 
 # wrangler secret put EMBEDDING_API_KEY --env staging
-# wrangler secret put GEMINI_API_KEY --env staging
+# wrangler secret put OPENROUTER_API_KEY --env staging
 
 # ============================================================================
 # PRODUCTION  →  wrangler deploy --env production
@@ -101,4 +101,4 @@ binding = "EMBEDDING_KV"
 id = "REPLACE_WITH_PRODUCTION_KV_ID"  # ⚠️ Must be replaced before deployment
 
 # wrangler secret put EMBEDDING_API_KEY --env production
-# wrangler secret put GEMINI_API_KEY --env production
+# wrangler secret put OPENROUTER_API_KEY --env production
