@@ -53,16 +53,17 @@ simple       = { limit = 120, period = 60 }
 # DEVELOPMENT  →  wrangler deploy --env dev
 # ============================================================================
 [env.dev]
+name = "embedding-worker-dev"
 [env.dev.ai]
 binding = "AI"
 
 [env.dev.vars]
-ENVIRONMENT = "dev"
-ALLOWED_ORIGINS = "https://dev.skillpassports.com"
+ENVIRONMENT = "development"
+ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,http://localhost:9001,http://127.0.0.1:8788,http://127.0.0.1:9001,https://skillpassport.rareminds.in,https://www.skillpassport.rareminds.in,https://*.rareminds.in,https://*.pages.dev"
 
 [[env.dev.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_DEV_KV_ID"
+id = "8faee86f16cc49989fd17063d15c8929"
 
 # wrangler secret put EMBEDDING_API_KEY --env dev
 # wrangler secret put OPENROUTER_API_KEY --env dev
@@ -71,16 +72,17 @@ id = "REPLACE_WITH_DEV_KV_ID"
 # STAGING  →  wrangler deploy --env staging
 # ============================================================================
 [env.staging]
+name = "embedding-worker-staging"
 [env.staging.ai]
 binding = "AI"
 
 [env.staging.vars]
 ENVIRONMENT = "staging"
-ALLOWED_ORIGINS = "https://stag.skillpassports.com"
+ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,http://localhost:9001,http://127.0.0.1:8788,http://127.0.0.1:9001,https://skillpassport.rareminds.in,https://www.skillpassport.rareminds.in,https://*.rareminds.in,https://*.pages.dev"
 
 [[env.staging.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_STAGING_KV_ID"
+id = "87fb2ee71c094bf58302e46da00c0f7e"
 
 # wrangler secret put EMBEDDING_API_KEY --env staging
 # wrangler secret put OPENROUTER_API_KEY --env staging
@@ -89,16 +91,17 @@ id = "REPLACE_WITH_STAGING_KV_ID"
 # PRODUCTION  →  wrangler deploy --env production
 # ============================================================================
 [env.production]
+name = "embedding-api"
 [env.production.ai]
 binding = "AI"
 
 [env.production.vars]
 ENVIRONMENT = "production"
-ALLOWED_ORIGINS = "https://skillpassport.com,https://www.skillpassport.com"
+ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,http://localhost:9001,http://127.0.0.1:8788,http://127.0.0.1:9001,https://skillpassport.rareminds.in,https://www.skillpassport.rareminds.in,https://*.rareminds.in,https://*.pages.dev"
 
 [[env.production.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_ID"  # ⚠️ Must be replaced before deployment
+id = "3cf92ef89a5b43bb9d420169cd68df22"
 
 # wrangler secret put EMBEDDING_API_KEY --env production
 # wrangler secret put OPENROUTER_API_KEY --env production
