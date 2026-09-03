@@ -103,12 +103,12 @@ function parseInput(input: unknown): ImageInput[] {
   return [toItem(input)];
 }
 
-async function fetchImageAsBase64(url: string, tenantId: string): Promise<{ data: string; mediaType: SupportedMediaType }> {
+async function fetchImageAsBase64(url: string, callerId: string): Promise<{ data: string; mediaType: SupportedMediaType }> {
   let res: Response;
   try {
     res = await fetch(url, { signal: AbortSignal.timeout(MAX_IMAGE_FETCH_TIMEOUT_MS) });
   } catch (err) {
-    console.error(JSON.stringify({ event: 'image_fetch.error', tenant_id: tenantId, error: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ event: 'image_fetch.error', caller_id: callerId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to fetch image URL', ERROR_CODES.INTERNAL_ERROR, 502);
   }
 
@@ -118,7 +118,7 @@ async function fetchImageAsBase64(url: string, tenantId: string): Promise<{ data
 
   const resolvedHostname = new URL(res.url).hostname;
   if (isPrivateHost(resolvedHostname)) {
-    console.error(JSON.stringify({ event: 'ssrf.redirect_blocked', tenant_id: tenantId, resolved: resolvedHostname }));
+    console.error(JSON.stringify({ event: 'ssrf.redirect_blocked', caller_id: callerId, resolved: resolvedHostname }));
     throw new ValidationError('URL resolved to a private or internal address', ERROR_CODES.INVALID_INPUT);
   }
 
@@ -146,13 +146,96 @@ async function fetchImageAsBase64(url: string, tenantId: string): Promise<{ data
   return { data, mediaType: mimeType as SupportedMediaType };
 }
 
+/**
+ * Result of generating image embeddings. Transport-agnostic: returned directly
+ * by the RPC entrypoint and wrapped into an HTTP envelope by {@link handleImageEmbed}.
+ */
+export interface ImageEmbedResult {
+  embeddings: EmbeddingItem[];
+  model: string;
+}
+
+/**
+ * Core image-embedding logic shared by the HTTP handler and the RPC entrypoint.
+ *
+ * Validates inputs, applies SSRF-guarded server-side fetching for URL inputs,
+ * rate limits, and calls the provider with bounded concurrency. Knows nothing
+ * about Request/Response.
+ *
+ * @param input - A single image input object or an array (max MAX_IMAGE_BATCH_SIZE).
+ *   Each item is `{ type: 'url', data }` or `{ type: 'base64', data, mediaType }`.
+ * @param env - Worker environment bindings.
+ * @param callerId - Identifier used for rate-limit bucketing and logging.
+ * @returns One embedding per input image, in input order.
+ * @throws ValidationError on invalid input or oversized batch.
+ * @throws WorkerError when GEMINI_API_KEY is missing or an image fetch fails.
+ * @throws RateLimitError when the caller exceeds its quota.
+ */
+export async function embedImageCore(
+  input: unknown,
+  env: Env,
+  callerId: string
+): Promise<ImageEmbedResult> {
+  if (!env.OPENROUTER_API_KEY) {
+    throw new WorkerError('Service misconfigured: OPENROUTER_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
+  }
+
+  const inputs = parseInput(input);
+
+  if (inputs.length > MAX_IMAGE_BATCH_SIZE) {
+    throw new ValidationError(`Batch size exceeds maximum of ${MAX_IMAGE_BATCH_SIZE}`, ERROR_CODES.INVALID_INPUT);
+  }
+
+  await checkRateLimit(callerId, 'image', env);
+
+  // Fetch URL inputs with a concurrency cap to avoid exhausting the connection pool.
+  // base64 inputs are already in memory — no fetch needed, resolve immediately.
+  const resolved: { mime_type: string; data: string }[] = new Array(inputs.length);
+  const urlInputs = inputs
+    .map((item, i) => ({ item, i }))
+    .filter(({ item }) => item.type === 'url');
+
+  const FETCH_CONCURRENCY = 2;
+  for (let offset = 0; offset < urlInputs.length; offset += FETCH_CONCURRENCY) {
+    await Promise.all(
+      urlInputs.slice(offset, offset + FETCH_CONCURRENCY).map(async ({ item, i }) => {
+        const { data, mediaType } = await fetchImageAsBase64((item as ImageInputUrl).data, callerId);
+        resolved[i] = { mime_type: mediaType, data };
+      })
+    );
+  }
+  for (const { item, i } of inputs.map((item, i) => ({ item, i }))) {
+    if (item.type === 'base64') {
+      resolved[i] = { mime_type: item.mediaType, data: item.data };
+    }
+  }
+
+  // Cap Gemini embed concurrency to avoid amplifying 429s under rate limiting.
+  // With MAX_RETRIES=3 and MAX_IMAGE_BATCH_SIZE=6, fully parallel would allow
+  // 24 simultaneous in-flight requests from a single user request.
+  const IMAGE_EMBED_CONCURRENCY = 2;
+  const embeddings: EmbeddingItem[] = [];
+  for (let offset = 0; offset < resolved.length; offset += IMAGE_EMBED_CONCURRENCY) {
+    const batch = await Promise.all(
+      resolved.slice(offset, offset + IMAGE_EMBED_CONCURRENCY).map(async ({ mime_type, data }, j) => {
+        const i = offset + j;
+        const embedding = await callImageProvider({ mime_type, data }, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS);
+        return { index: i, embedding, dimensions: embedding.length };
+      })
+    );
+    embeddings.push(...batch);
+  }
+
+  return { embeddings, model: GEMINI_MODEL_ID };
+}
+
 export async function handleImageEmbed(
   request: Request,
   ctx: RequestContext,
   env: Env
 ): Promise<Response> {
   const bodyText = await request.text().catch((err) => {
-    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'image', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'image', caller_id: ctx.callerId, error: err instanceof Error ? err.message : String(err) }));
     throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
   });
 
@@ -176,59 +259,15 @@ export async function handleImageEmbed(
     );
   }
 
-  const inputs = parseInput(body.input);
-
-  if (inputs.length > MAX_IMAGE_BATCH_SIZE) {
-    throw new ValidationError(`Batch size exceeds maximum of ${MAX_IMAGE_BATCH_SIZE}`, ERROR_CODES.INVALID_INPUT);
-  }
-
-  await checkRateLimit(ctx.tenantId, 'image', env);
-
-  // Fetch URL inputs with a concurrency cap to avoid exhausting the connection pool.
-  // base64 inputs are already in memory — no fetch needed, resolve immediately.
-  const resolved: { mime_type: string; data: string }[] = new Array(inputs.length);
-  const urlInputs = inputs
-    .map((item, i) => ({ item, i }))
-    .filter(({ item }) => item.type === 'url');
-
-  const FETCH_CONCURRENCY = 2;
-  for (let offset = 0; offset < urlInputs.length; offset += FETCH_CONCURRENCY) {
-    await Promise.all(
-      urlInputs.slice(offset, offset + FETCH_CONCURRENCY).map(async ({ item, i }) => {
-        const { data, mediaType } = await fetchImageAsBase64((item as ImageInputUrl).data, ctx.tenantId);
-        resolved[i] = { mime_type: mediaType, data };
-      })
-    );
-  }
-  for (const { item, i } of inputs.map((item, i) => ({ item, i }))) {
-    if (item.type === 'base64') {
-      resolved[i] = { mime_type: item.mediaType, data: item.data };
-    }
-  }
-
-  // Cap Gemini embed concurrency to avoid amplifying 429s under rate limiting.
-  // With MAX_RETRIES=3 and MAX_IMAGE_BATCH_SIZE=6, fully parallel would allow
-  // 24 simultaneous in-flight requests from a single user request.
-  const IMAGE_EMBED_CONCURRENCY = 2;
-  const embeddings: EmbeddingItem[] = [];
-  for (let offset = 0; offset < resolved.length; offset += IMAGE_EMBED_CONCURRENCY) {
-    const batch = await Promise.all(
-      resolved.slice(offset, offset + IMAGE_EMBED_CONCURRENCY).map(async ({ mime_type, data }, j) => {
-        const i = offset + j;
-        const embedding = await callImageProvider({ mime_type, data }, env.GEMINI_API_KEY, ctx.tenantId);
-        return { index: i, embedding, dimensions: embedding.length };
-      })
-    );
-    embeddings.push(...batch);
-  }
+  const result = await embedImageCore(body.input, env, ctx.callerId);
 
   const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'image', tenant_id: ctx.tenantId, latency_ms, model: GEMINI_MODEL_ID, count: embeddings.length }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'image', caller_id: ctx.callerId, latency_ms, model: result.model, count: result.embeddings.length }));
 
   return jsonOk({
     success: true,
-    embeddings,
-    model: GEMINI_MODEL_ID,
+    embeddings: result.embeddings,
+    model: result.model,
     request_id: ctx.requestId,
     latency_ms,
   }, 200, request, env, ctx.requestId);

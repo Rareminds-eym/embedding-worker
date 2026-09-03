@@ -3,7 +3,7 @@
 import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { callPdfProvider, callDocProvider, GEMINI_MODEL_ID } from '../providers';
+import { callDocProvider, GEMINI_MODEL_ID } from '../providers';
 import {
   MAX_DOC_REQUEST_BODY_SIZE,
   MAX_DOC_BINARY_SIZE,
@@ -68,49 +68,65 @@ function chunkText(text: string): string[] {
   return chunks;
 }
 
-export async function handleDocEmbed(
-  request: Request,
-  ctx: RequestContext,
-  env: Env
-): Promise<Response> {
-  const bodyText = await request.text().catch((err) => {
-    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'doc', tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
-    throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
-  });
-  if (bodyText.length > MAX_DOC_REQUEST_BODY_SIZE) {
-    throw new ValidationError(`Actual body size ${bodyText.length} exceeds limit ${MAX_DOC_REQUEST_BODY_SIZE}`, ERROR_CODES.INVALID_INPUT);
+/**
+ * Metadata describing the processed document, returned alongside its embeddings.
+ */
+export interface DocMetadata {
+  filename: string;
+  mimeType: string;
+  type: string;
+  chunks: number;
+  total_chars?: number;
+  chunk_size?: number;
+  chunk_overlap?: number;
+  pages_detected?: number;
+  pages_processed?: number;
+}
+
+/**
+ * Result of generating document embeddings. Transport-agnostic: returned
+ * directly by the RPC entrypoint and wrapped into an HTTP envelope by
+ * {@link handleDocEmbed}.
+ */
+export interface DocEmbedResult {
+  embeddings: EmbeddingItem[];
+  model: string;
+  document: DocMetadata;
+}
+
+/**
+ * Core document-embedding logic shared by the HTTP handler and the RPC entrypoint.
+ *
+ * Validates the base64 input, embeds PDFs natively via Gemini, and converts
+ * DOCX/XLSX to markdown (Workers AI) before chunking and embedding. Knows
+ * nothing about Request/Response.
+ *
+ * @param input - `{ mimeType, data (base64), filename? }`.
+ * @param maxPages - Optional page cap (DOCX/XLSX only); undefined for no limit.
+ *   Must be undefined for PDFs.
+ * @param env - Worker environment bindings (requires AI binding for DOCX/XLSX).
+ * @param callerId - Identifier used for rate-limit bucketing and logging.
+ * @returns Embeddings (one per chunk; one for PDFs) plus document metadata.
+ * @throws ValidationError on invalid input, mime type, or oversized document.
+ * @throws WorkerError when GEMINI_API_KEY is missing or conversion fails.
+ * @throws RateLimitError when the caller exceeds its quota.
+ */
+export async function embedDocCore(
+  input: unknown,
+  maxPages: number | undefined,
+  env: Env,
+  callerId: string
+): Promise<DocEmbedResult> {
+  if (!env.OPENROUTER_API_KEY) {
+    throw new WorkerError('Service misconfigured: OPENROUTER_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
   }
 
-  const body = (() => {
-    try { return JSON.parse(bodyText) as Record<string, unknown>; }
-    catch { return null; }
-  })();
-
-  if (!body || !('input' in body)) {
-    throw new ValidationError('Missing required field: input', ERROR_CODES.INVALID_INPUT);
-  }
-
-  if (typeof body.model === 'string') {
-    throw new ValidationError(
-      `model parameter is not supported. Document embeddings always use ${GEMINI_MODEL_ID}.`,
-      ERROR_CODES.INVALID_INPUT
-    );
-  }
-
-  const maxPages = (() => {
-    if (!('max_pages' in body)) return undefined;
-    const v = Number(body.max_pages);
-    if (!Number.isInteger(v) || v < 1) throw new ValidationError('max_pages must be a positive integer', ERROR_CODES.INVALID_INPUT);
-    if (v > DOC_MAX_PAGES) throw new ValidationError(`max_pages cannot exceed ${DOC_MAX_PAGES}`, ERROR_CODES.INVALID_INPUT);
-    return v;
-  })();
-
-  const input = body.input as Record<string, unknown>;
-  if (typeof input !== 'object' || input === null) {
+  const doc = input as Record<string, unknown>;
+  if (typeof doc !== 'object' || doc === null) {
     throw new ValidationError('input must be an object', ERROR_CODES.INVALID_INPUT);
   }
 
-  const mimeType = input.mimeType as string;
+  const mimeType = doc.mimeType as string;
   if (!mimeType || !Object.prototype.hasOwnProperty.call(ALLOWED_DOC_TYPES, mimeType)) {
     throw new ValidationError(
       `input.mimeType "${mimeType}" must be one of: ${Object.keys(ALLOWED_DOC_TYPES).join(', ')}`,
@@ -118,26 +134,41 @@ export async function handleDocEmbed(
     );
   }
 
-  if (typeof input.data !== 'string' || input.data.trim().length === 0) {
+  if (maxPages !== undefined) {
+    if (mimeType === 'application/pdf') {
+      throw new ValidationError(
+        'max_pages is not supported for PDF inputs. PDFs are converted to markdown and processed as text chunks.',
+        ERROR_CODES.INVALID_INPUT
+      );
+    }
+    if (!Number.isInteger(maxPages) || maxPages < 1) {
+      throw new ValidationError('max_pages must be a positive integer', ERROR_CODES.INVALID_INPUT);
+    }
+    if (maxPages > DOC_MAX_PAGES) {
+      throw new ValidationError(`max_pages cannot exceed ${DOC_MAX_PAGES}`, ERROR_CODES.INVALID_INPUT);
+    }
+  }
+
+  if (typeof doc.data !== 'string' || doc.data.trim().length === 0) {
     throw new ValidationError('input.data must be a non-empty base64 string', ERROR_CODES.INVALID_INPUT);
   }
 
   const MAX_BASE64_LEN = Math.ceil(MAX_DOC_BINARY_SIZE * 4 / 3) + 4;
-  if (input.data.length > MAX_BASE64_LEN) {
+  if (doc.data.length > MAX_BASE64_LEN) {
     throw new ValidationError('input.data exceeds maximum encoded size', ERROR_CODES.INVALID_INPUT);
   }
 
-  await checkRateLimit(ctx.tenantId, 'doc', env);
+  await checkRateLimit(callerId, 'doc', env);
 
   const docType = ALLOWED_DOC_TYPES[mimeType as AllowedDocMimeType];
-  const rawFilename = typeof input.filename === 'string' && input.filename.trim().length > 0
-    ? input.filename.trim()
+  const rawFilename = typeof doc.filename === 'string' && doc.filename.trim().length > 0
+    ? doc.filename.trim()
     : `document.${docType.ext}`;
   const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 255);
 
   let binaryData: Uint8Array;
   try {
-    binaryData = Uint8Array.from(atob(input.data as string), c => c.charCodeAt(0));
+    binaryData = Uint8Array.from(atob(doc.data as string), c => c.charCodeAt(0));
   } catch {
     throw new ValidationError('input.data is not valid base64', ERROR_CODES.INVALID_INPUT);
   }
@@ -149,33 +180,7 @@ export async function handleDocEmbed(
     );
   }
 
-  if (mimeType === 'application/pdf') {
-    if (maxPages !== undefined) {
-      throw new ValidationError(
-        `max_pages is not supported for PDF inputs. Gemini processes the full PDF natively (up to 6 pages). Split the document if you need to limit scope.`,
-        ERROR_CODES.INVALID_INPUT
-      );
-    }
 
-    const embedding = await callPdfProvider(input.data, env.GEMINI_API_KEY, ctx.tenantId);
-
-    const latency_ms = Date.now() - ctx.startTime;
-    console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'pdf-native', tenant_id: ctx.tenantId, latency_ms, model: GEMINI_MODEL_ID }));
-
-    return jsonOk({
-      success: true,
-      embeddings: [{ index: 0, embedding, dimensions: embedding.length }] as EmbeddingItem[],
-      model: GEMINI_MODEL_ID,
-      document: {
-        filename,
-        mimeType,
-        type: docType.label,
-        chunks: 1,
-      },
-      request_id: ctx.requestId,
-      latency_ms,
-    }, 200, request, env, ctx.requestId);
-  }
 
   const blob = new Blob([binaryData], { type: mimeType });
   let conversionResult: { name: string; format: string; data?: string; error?: string } | undefined;
@@ -207,7 +212,7 @@ export async function handleDocEmbed(
     if (err instanceof WorkerError || err instanceof ValidationError) throw err;
     const msg = err instanceof Error ? err.message : String(err);
     const isTimeout = /timeout|timed out/i.test(msg);
-    console.error(JSON.stringify({ event: 'toMarkdown.error', tenant_id: ctx.tenantId, filename, mimeType, binary_size: binaryData.length, request_id: ctx.requestId, error: msg }));
+    console.error(JSON.stringify({ event: 'toMarkdown.error', caller_id: callerId, filename, mimeType, binary_size: binaryData.length, error: msg }));
     throw new WorkerError(
       isTimeout ? 'Document conversion timed out. The file may be too large or complex.' : 'Document conversion failed. The file may be corrupted or unsupported.',
       ERROR_CODES.INTERNAL_ERROR,
@@ -217,7 +222,7 @@ export async function handleDocEmbed(
 
   if (conversionResult.format === 'error' || !conversionResult.data) {
     if (conversionResult.error) {
-      console.error(JSON.stringify({ event: 'toMarkdown.format_error', tenant_id: ctx.tenantId, filename, mimeType, detail: conversionResult.error }));
+      console.error(JSON.stringify({ event: 'toMarkdown.format_error', caller_id: callerId, filename, mimeType, detail: conversionResult.error }));
     }
     throw new ValidationError(
       'Document could not be converted. Ensure the file is not password-protected, corrupted, or empty.',
@@ -271,14 +276,12 @@ export async function handleDocEmbed(
     throw new ValidationError('Document produced no embeddable chunks', ERROR_CODES.INVALID_INPUT);
   }
 
-  const result = await callDocProvider(chunks, env.GEMINI_API_KEY, ctx.tenantId);
+  const providerResult = await callDocProvider(chunks, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS);
 
-  const latency_ms = Date.now() - ctx.startTime;
-  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', tenant_id: ctx.tenantId, latency_ms, model: GEMINI_MODEL_ID, chunks: chunks.length }));
+  console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', caller_id: callerId, model: GEMINI_MODEL_ID, chunks: chunks.length }));
 
-  return jsonOk({
-    success: true,
-    embeddings: result.embeddings.map((item): EmbeddingItem => ({
+  return {
+    embeddings: providerResult.embeddings.map((item): EmbeddingItem => ({
       index: item.index,
       embedding: item.embedding,
       dimensions: item.embedding.length,
@@ -294,6 +297,55 @@ export async function handleDocEmbed(
       chunk_overlap: DOC_CHUNK_OVERLAP,
       ...(pagesDetected !== undefined && { pages_detected: pagesDetected, pages_processed: pagesProcessed }),
     },
+  };
+}
+
+export async function handleDocEmbed(
+  request: Request,
+  ctx: RequestContext,
+  env: Env
+): Promise<Response> {
+  const bodyText = await request.text().catch((err) => {
+    console.error(JSON.stringify({ event: 'body_read_error', endpoint: 'doc', caller_id: ctx.callerId, error: err instanceof Error ? err.message : String(err) }));
+    throw new WorkerError('Failed to read request body', ERROR_CODES.INTERNAL_ERROR, 500);
+  });
+  if (bodyText.length > MAX_DOC_REQUEST_BODY_SIZE) {
+    throw new ValidationError(`Actual body size ${bodyText.length} exceeds limit ${MAX_DOC_REQUEST_BODY_SIZE}`, ERROR_CODES.INVALID_INPUT);
+  }
+
+  const body = (() => {
+    try { return JSON.parse(bodyText) as Record<string, unknown>; }
+    catch { return null; }
+  })();
+
+  if (!body || !('input' in body)) {
+    throw new ValidationError('Missing required field: input', ERROR_CODES.INVALID_INPUT);
+  }
+
+  if (typeof body.model === 'string') {
+    throw new ValidationError(
+      `model parameter is not supported. Document embeddings always use ${GEMINI_MODEL_ID}.`,
+      ERROR_CODES.INVALID_INPUT
+    );
+  }
+
+  const maxPages = (() => {
+    if (!('max_pages' in body)) return undefined;
+    const v = Number(body.max_pages);
+    if (!Number.isInteger(v) || v < 1) throw new ValidationError('max_pages must be a positive integer', ERROR_CODES.INVALID_INPUT);
+    if (v > DOC_MAX_PAGES) throw new ValidationError(`max_pages cannot exceed ${DOC_MAX_PAGES}`, ERROR_CODES.INVALID_INPUT);
+    return v;
+  })();
+
+  const result = await embedDocCore(body.input, maxPages, env, ctx.callerId);
+
+  const latency_ms = Date.now() - ctx.startTime;
+
+  return jsonOk({
+    success: true,
+    embeddings: result.embeddings,
+    model: result.model,
+    document: result.document,
     request_id: ctx.requestId,
     latency_ms,
   }, 200, request, env, ctx.requestId);
