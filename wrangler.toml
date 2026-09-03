@@ -1,32 +1,107 @@
-name = "embedding-worker"
+# Deployed worker name. Must match the `service` value of the EMBEDDING_SERVICE
+# binding in the consuming app's wrangler.toml, and the existing public URL
+# (embedding-api.<account>.workers.dev).
+name = "embedding-api"
 main = "src/index.ts"
-compatibility_date = "2026-06-08"
+compatibility_date = "2025-03-20"
 compatibility_flags = ["nodejs_compat"]
 
 [dev]
 port = 9004
-inspector_port = 9231
+inspector_port = 9230
 
 [observability]
 enabled = true
 
+# ============================================================================
+# LOCAL  →  wrangler dev  (uses preview_id for KV, secrets from .dev.vars)
+# ============================================================================
+# NOTE: Workers AI (`AI`) has no local emulation — it always proxies to
+# Cloudflare and needs `wrangler login`. It is only used for PDF→markdown
+# (env.AI.toMarkdown). Disabled locally so `wrangler dev` runs fully local;
+# text/image/doc embeddings go through GEMINI_API_KEY and are unaffected.
 [ai]
 binding = "AI"
 
 [vars]
-ENVIRONMENT = "production"
-ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,http://localhost:9004,http://127.0.0.1:8788,http://127.0.0.1:9004,https://*.rareminds.in,https://*.pages.dev"
+ENVIRONMENT = "local"
+ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788"
 
 [[kv_namespaces]]
-binding = "EMBEDDING_KV"
-id = "3cf92ef89a5b43bb9d420169cd68df22"
+binding    = "EMBEDDING_KV"
+id         = "REPLACE_WITH_LOCAL_KV_ID"      # local dev — replace with your actual local KV namespace ID
+preview_id = "REPLACE_WITH_LOCAL_KV_ID"      # used by wrangler dev; same as id for local
 
+# Native rate limiting — counters are cached per Cloudflare location and updated
+# asynchronously. namespace_id is a positive integer you choose. period must be 10 or 60.
+# The key passed at runtime is callerId:endpoint (callerId is "http" for all
+# HTTP callers — single shared API key — or "rpc" for service-binding callers).
 [[unsafe.bindings]]
 name         = "RATE_LIMITER"
 type         = "ratelimit"
-namespace_id = "1004"
+namespace_id = "1001"
 simple       = { limit = 120, period = 60 }
 
-# wrangler secret put ADMIN_KEY
-# wrangler secret put GEMINI_API_KEY
-# ⚠️ EMBEDDING_KV id above is a placeholder — replace with production KV namespace id before deploying
+# KV key schema:
+#   rl:<callerId>:<endpoint>:<window>  → rate-limit counter (fallback limiter)
+#   health:check                       → health probe key
+
+# wrangler secret put EMBEDDING_API_KEY
+# wrangler secret put OPENROUTER_API_KEY
+
+# ============================================================================
+# DEVELOPMENT  →  wrangler deploy --env dev
+# ============================================================================
+[env.dev]
+name = "embedding-worker-dev"
+[env.dev.ai]
+binding = "AI"
+
+[env.dev.vars]
+ENVIRONMENT = "development"
+ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,http://localhost:9001,http://127.0.0.1:8788,http://127.0.0.1:9001,https://skillpassport.rareminds.in,https://www.skillpassport.rareminds.in,https://*.rareminds.in,https://*.pages.dev"
+
+[[env.dev.kv_namespaces]]
+binding = "EMBEDDING_KV"
+id = "8faee86f16cc49989fd17063d15c8929"
+
+# wrangler secret put EMBEDDING_API_KEY --env dev
+# wrangler secret put OPENROUTER_API_KEY --env dev
+
+# ============================================================================
+# STAGING  →  wrangler deploy --env staging
+# ============================================================================
+[env.staging]
+name = "embedding-worker-staging"
+[env.staging.ai]
+binding = "AI"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,http://localhost:9001,http://127.0.0.1:8788,http://127.0.0.1:9001,https://skillpassport.rareminds.in,https://www.skillpassport.rareminds.in,https://*.rareminds.in,https://*.pages.dev"
+
+[[env.staging.kv_namespaces]]
+binding = "EMBEDDING_KV"
+id = "87fb2ee71c094bf58302e46da00c0f7e"
+
+# wrangler secret put EMBEDDING_API_KEY --env staging
+# wrangler secret put OPENROUTER_API_KEY --env staging
+
+# ============================================================================
+# PRODUCTION  →  wrangler deploy --env production
+# ============================================================================
+[env.production]
+name = "embedding-api"
+[env.production.ai]
+binding = "AI"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,http://localhost:9001,http://127.0.0.1:8788,http://127.0.0.1:9001,https://skillpassport.rareminds.in,https://www.skillpassport.rareminds.in,https://*.rareminds.in,https://*.pages.dev"
+
+[[env.production.kv_namespaces]]
+binding = "EMBEDDING_KV"
+id = "3cf92ef89a5b43bb9d420169cd68df22"
+
+# wrangler secret put EMBEDDING_API_KEY --env production
+# wrangler secret put OPENROUTER_API_KEY --env production

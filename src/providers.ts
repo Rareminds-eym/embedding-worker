@@ -11,15 +11,14 @@ import {
   PROVIDER_DEFAULT_RETRY_MS,
 } from './constants';
 
-const GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
-const GEMINI_MODEL = 'gemini-embedding-2-preview';
-const GEMINI_AUTH_HEADER = 'x-goog-api-key';
-export const GEMINI_TIMEOUT_MS = 30_000;
-const GEMINI_OUTPUT_DIM = 3072;
-const GEMINI_ERROR_PREVIEW = 200;
+const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
+const OPENROUTER_MODEL = 'google/gemini-embedding-2-preview';
+export const OPENROUTER_TIMEOUT_MS = 30_000;
+const OPENROUTER_OUTPUT_DIM = 1536;
+const PROVIDER_ERROR_PREVIEW = 200;
 
-export const GEMINI_MODEL_ID = GEMINI_MODEL;
-export const GEMINI_DIMENSIONS = GEMINI_OUTPUT_DIM;
+export const GEMINI_MODEL_ID = OPENROUTER_MODEL;
+export const GEMINI_DIMENSIONS = OPENROUTER_OUTPUT_DIM;
 
 export const GEMINI_TASK_TYPES = [
   'RETRIEVAL_DOCUMENT',
@@ -44,52 +43,47 @@ export interface DocProviderResponse {
   embeddings: { index: number; embedding: number[] }[];
 }
 
-interface GeminiPart {
-  text?: string;
-  inline_data?: { mime_type: string; data: string };
+interface OpenRouterEmbeddingItem {
+  object: 'embedding';
+  index: number;
+  embedding: number[];
 }
 
-interface GeminiEmbedRequest {
-  content: { parts: GeminiPart[] };
-  taskType?: string;
-  output_dimensionality?: number;
+interface OpenRouterEmbeddingsResponse {
+  object: 'list';
+  data: OpenRouterEmbeddingItem[];
+  model: string;
 }
 
-interface GeminiEmbedResponse {
-  embedding: { values: number[] };
-}
-
-interface GeminiBatchRequest {
-  requests: Array<{ model: string } & GeminiEmbedRequest>;
-}
-
-interface GeminiBatchResponse {
-  embeddings: Array<{ values: number[] }>;
-}
-
-function isGeminiEmbedResponse(json: unknown): json is GeminiEmbedResponse {
+function isOpenRouterEmbeddingsResponse(json: unknown): json is OpenRouterEmbeddingsResponse {
   if (!json || typeof json !== 'object') return false;
   const j = json as Record<string, unknown>;
-  if (!j.embedding || typeof j.embedding !== 'object') return false;
-  const emb = j.embedding as Record<string, unknown>;
-  return Array.isArray(emb.values) && emb.values.length > 0;
+  if (j.object !== 'list' || !Array.isArray(j.data)) return false;
+  return j.data.every(item => {
+    if (!item || typeof item !== 'object') return false;
+    const i = item as Record<string, unknown>;
+    return Array.isArray(i.embedding) && i.embedding.length > 0;
+  });
 }
 
-function isGeminiBatchResponse(json: unknown, expectedCount: number): json is GeminiBatchResponse {
-  if (!json || typeof json !== 'object') return false;
-  const j = json as Record<string, unknown>;
-  return Array.isArray(j.embeddings) && j.embeddings.length === expectedCount;
+function mapTaskTypeToInputType(taskType?: string): string | undefined {
+  if (!taskType) return undefined;
+  if (taskType === 'RETRIEVAL_QUERY' || taskType === 'CODE_RETRIEVAL_QUERY') {
+    return 'search_query';
+  }
+  if (taskType === 'RETRIEVAL_DOCUMENT') {
+    return 'search_document';
+  }
+  return undefined;
 }
 
 interface RetryContext {
   endpoint: string;
-  tenantId: string;
+  callerId: string;
 }
 
 async function callWithRetry<T>(
   url: string,
-  // Accept a pre-built Headers object so the API key is never stored in any
-  // plain object that could be accidentally serialized into logs.
   headers: Headers,
   body: object,
   validate: (json: unknown) => T,
@@ -112,10 +106,10 @@ async function callWithRetry<T>(
         method: 'POST',
         headers: new Headers(headers),
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(Math.max(PROVIDER_MIN_TIMEOUT_MS, Math.min(GEMINI_TIMEOUT_MS, remainingMs))),
+        signal: AbortSignal.timeout(Math.max(PROVIDER_MIN_TIMEOUT_MS, Math.min(OPENROUTER_TIMEOUT_MS, remainingMs))),
       });
     } catch (err) {
-      console.error(JSON.stringify({ event: 'provider.request_failed', endpoint: ctx.endpoint, tenant_id: ctx.tenantId, attempt: attempt + 1, error: err instanceof Error ? err.message : String(err) }));
+      console.error(JSON.stringify({ event: 'provider.request_failed', endpoint: ctx.endpoint, caller_id: ctx.callerId, attempt: attempt + 1, error: err instanceof Error ? err.message : String(err) }));
       if (attempt < MAX_RETRIES) {
         const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt), 30_000);
         if (Date.now() + delay > deadline) throw new ProviderError(`${ctx.endpoint} timeout after ${attempt + 1} attempts`, 502);
@@ -133,7 +127,7 @@ async function callWithRetry<T>(
         await new Promise(r => setTimeout(r, retryMs));
         continue;
       }
-      console.error(JSON.stringify({ event: 'provider.rate_limit', endpoint: ctx.endpoint, tenant_id: ctx.tenantId }));
+      console.error(JSON.stringify({ event: 'provider.rate_limit', endpoint: ctx.endpoint, caller_id: ctx.callerId }));
       throw new RateLimitError(
         retryAfterSeconds ? `Rate limit exceeded. Retry after ${retryAfterSeconds}s.` : 'Rate limit exceeded. Please wait before retrying.',
         retryAfterSeconds,
@@ -149,7 +143,7 @@ async function callWithRetry<T>(
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
-      console.error(JSON.stringify({ event: 'provider.error', endpoint: ctx.endpoint, status: res.status, tenant_id: ctx.tenantId, response_preview: body.slice(0, GEMINI_ERROR_PREVIEW) }));
+      console.error(JSON.stringify({ event: 'provider.error', endpoint: ctx.endpoint, status: res.status, caller_id: ctx.callerId, response_preview: body.slice(0, PROVIDER_ERROR_PREVIEW) }));
       throw new ProviderError(`${ctx.endpoint} error (${res.status})`, res.status);
     }
 
@@ -161,7 +155,7 @@ async function callWithRetry<T>(
       if (err instanceof SyntaxError || err instanceof TypeError) {
         throw new ProviderError(`${ctx.endpoint} returned invalid JSON`, 502);
       }
-      console.error(JSON.stringify({ event: 'provider.invalid_response', endpoint: ctx.endpoint, tenant_id: ctx.tenantId, error: err instanceof Error ? err.message : String(err) }));
+      console.error(JSON.stringify({ event: 'provider.invalid_response', endpoint: ctx.endpoint, caller_id: ctx.callerId, error: err instanceof Error ? err.message : String(err) }));
       throw new ProviderError(`${ctx.endpoint} returned an invalid response`, 502);
     }
   }
@@ -181,113 +175,91 @@ function parseRetryAfter(header: string | null): number | undefined {
   return undefined;
 }
 
-function embedEndpoint(): string {
-  return `${GEMINI_API_BASE}/${GEMINI_MODEL}:embedContent`;
-}
-
-function batchEmbedEndpoint(): string {
-  return `${GEMINI_API_BASE}/${GEMINI_MODEL}:batchEmbedContents`;
-}
-
-async function callEmbedContent(
-  parts: GeminiPart[],
+async function callOpenRouterEmbeddings(
+  input: string | string[] | Record<string, unknown>[],
   apiKey: string,
-  tenantId: string,
-  endpoint: string,
+  callerId: string,
+  endpointLabel: string,
+  allowedOrigins: string,
   taskType?: string,
-): Promise<number[]> {
-  const body: GeminiEmbedRequest = { content: { parts }, output_dimensionality: GEMINI_OUTPUT_DIM };
-  if (taskType) body.taskType = taskType;
-
-  const headers = new Headers({ 'Content-Type': 'application/json', [GEMINI_AUTH_HEADER]: apiKey });
-
-  return callWithRetry(
-    embedEndpoint(),
-    headers,
-    body,
-    (json) => {
-      if (!isGeminiEmbedResponse(json)) throw new ProviderError(`${endpoint} returned invalid response`, 502);
-      return json.embedding.values;
-    },
-    { endpoint, tenantId },
-  );
-}
-
-async function callBatchEmbedContents(
-  texts: string[],
-  apiKey: string,
-  tenantId: string,
-  taskType: string,
-  batchOffset = 0,
 ): Promise<number[][]> {
-  if (texts.length === 0) throw new ProviderError('batch: empty input', 400);
-  if (texts.length > 100) throw new ProviderError(`batch: size ${texts.length} exceeds maximum of 100`, 400);
-
-  const body: GeminiBatchRequest = {
-    requests: texts.map(text => ({
-      model: `models/${GEMINI_MODEL}`,
-      content: { parts: [{ text }] },
-      taskType,
-      output_dimensionality: GEMINI_OUTPUT_DIM,
-    })),
+  const inputType = mapTaskTypeToInputType(taskType);
+  const body: Record<string, unknown> = {
+    model: OPENROUTER_MODEL,
+    input,
+    dimensions: OPENROUTER_OUTPUT_DIM,
   };
+  if (inputType) {
+    body.input_type = inputType;
+  }
 
-  const endpointLabel = `batch[${batchOffset}-${batchOffset + texts.length - 1}]`;
-
-  const headers = new Headers({ 'Content-Type': 'application/json', [GEMINI_AUTH_HEADER]: apiKey });
+  const referer = allowedOrigins.split(',')[0]?.trim();
+  if (!referer) {
+    throw new ProviderError('allowedOrigins configuration is required for HTTP-Referer header', 500);
+  }
+  const headers = new Headers({
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${apiKey}`,
+    'HTTP-Referer': referer,
+    'X-Title': 'SkillPassport Embedding Service',
+  });
 
   return callWithRetry(
-    batchEmbedEndpoint(),
+    `${OPENROUTER_API_BASE}/embeddings`,
     headers,
     body,
     (json) => {
-      if (!isGeminiBatchResponse(json, texts.length)) {
-        const actual = Array.isArray((json as Record<string, unknown>)?.embeddings)
-          ? ((json as Record<string, unknown>).embeddings as unknown[]).length
-          : 'unknown';
-        throw new ProviderError(`${endpointLabel} returned ${actual} embeddings, expected ${texts.length}`, 502);
+      if (!isOpenRouterEmbeddingsResponse(json)) {
+        throw new ProviderError(`${endpointLabel} returned invalid response`, 502);
       }
-      return json.embeddings.map((e, i) => {
-        if (!e?.values || !Array.isArray(e.values) || e.values.length === 0) {
-          throw new ProviderError(`${endpointLabel} missing embedding at chunk index ${batchOffset + i}`, 502);
-        }
-        return e.values;
-      });
+      const sortedData = [...json.data].sort((a, b) => a.index - b.index);
+      return sortedData.map(item => item.embedding);
     },
-    { endpoint: endpointLabel, tenantId },
+    { endpoint: endpointLabel, callerId },
   );
 }
 
 export async function callTextProvider(
   input: string,
   apiKey: string,
-  tenantId: string,
+  callerId: string,
+  allowedOrigins: string,
   taskType: string = GEMINI_DEFAULT_TASK_TYPE,
 ): Promise<TextProviderResponse> {
-  const embedding = await callEmbedContent([{ text: input }], apiKey, tenantId, 'text', taskType);
-  return { embedding };
+  const embeddings = await callOpenRouterEmbeddings(input, apiKey, callerId, 'text', allowedOrigins, taskType);
+  if (embeddings.length === 0) throw new ProviderError('text: no embedding returned', 502);
+  return { embedding: embeddings[0] };
 }
 
 export async function callImageProvider(
   image: { mime_type: string; data: string },
   apiKey: string,
-  tenantId: string,
+  callerId: string,
+  allowedOrigins: string,
 ): Promise<number[]> {
-  return callEmbedContent([{ inline_data: image }], apiKey, tenantId, 'image');
-}
-
-export async function callPdfProvider(
-  pdfBase64: string,
-  apiKey: string,
-  tenantId: string,
-): Promise<number[]> {
-  return callEmbedContent([{ inline_data: { mime_type: 'application/pdf', data: pdfBase64 } }], apiKey, tenantId, 'pdf');
+  const embeddings = await callOpenRouterEmbeddings(
+    [
+      {
+        type: 'image_url',
+        image_url: {
+          url: `data:${image.mime_type};base64,${image.data}`,
+        },
+      },
+    ],
+    apiKey,
+    callerId,
+    'image',
+    allowedOrigins,
+  );
+  if (embeddings.length === 0) throw new ProviderError('image: no embedding returned', 502);
+  return embeddings[0];
 }
 
 export async function callDocProvider(
   chunks: string[],
   apiKey: string,
-  tenantId: string,
+  callerId: string,
+  allowedOrigins: string,
 ): Promise<DocProviderResponse> {
   const result: DocProviderResponse = {
     embeddings: Array.from({ length: chunks.length }, (_, i) => ({ index: i, embedding: [] as number[] })),
@@ -299,9 +271,13 @@ export async function callDocProvider(
   for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
     await Promise.all(batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY).map(async (i) => {
       const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-      const embeddings = await callBatchEmbedContents(batch, apiKey, tenantId, GEMINI_DEFAULT_TASK_TYPE, i);
+      const embeddings = await callOpenRouterEmbeddings(batch, apiKey, callerId, `batch[${i}-${i + batch.length - 1}]`, allowedOrigins, GEMINI_DEFAULT_TASK_TYPE);
       embeddings.forEach((embedding, j) => { result.embeddings[i + j] = { index: i + j, embedding }; });
     }));
+  }
+
+  if (result.embeddings.length === 0) {
+    throw new ProviderError('doc: no embeddings returned', 502);
   }
 
   return result;
