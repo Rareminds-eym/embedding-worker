@@ -53,7 +53,7 @@ simple       = { limit = 120, period = 60 }
 # DEVELOPMENT  →  wrangler deploy --env dev
 # ============================================================================
 [env.dev]
-name = "embedding-worker-dev"
+name = "embedding-api-dev"
 [env.dev.ai]
 binding = "AI"
 
@@ -63,7 +63,13 @@ ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:
 
 [[env.dev.kv_namespaces]]
 binding = "EMBEDDING_KV"
-id = "8faee86f16cc49989fd17063d15c8929"
+id = "a2a801ae01454849882a6ce1e80ee0b3"
+
+[[env.dev.unsafe.bindings]]
+name         = "RATE_LIMITER"
+type         = "ratelimit"
+namespace_id = "1002"
+simple       = { limit = 120, period = 60 }
 
 # wrangler secret put EMBEDDING_API_KEY --env dev
 # wrangler secret put OPENROUTER_API_KEY --env dev
