@@ -3,7 +3,7 @@
 import type { Env, RequestContext } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { callTextProvider, GEMINI_MODEL_ID, GEMINI_TASK_TYPES, GEMINI_DEFAULT_TASK_TYPE } from '../providers';
+import { callTextProvider, GEMINI_MODEL_ID, GEMINI_TASK_TYPES, GEMINI_DEFAULT_TASK_TYPE, gatewayFromEnv } from '../providers';
 import type { GeminiTaskType } from '../providers';
 import { ERROR_CODES, TEXT_MAX_CHARS, MAX_REQUEST_BODY_SIZE } from '../constants';
 import { checkRateLimit } from '../utils/ratelimit';
@@ -217,7 +217,7 @@ export async function embedTextCore(
 
   await checkRateLimit(callerId, 'text', env);
 
-  const result = await callTextProvider(text, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS, resolvedTaskType);
+  const result = await callTextProvider(text, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS, resolvedTaskType, gatewayFromEnv(env));
   const embedding = result.embedding;
 
   return {

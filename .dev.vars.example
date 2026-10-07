@@ -1,4 +1,10 @@
 EMBEDDING_API_KEY=ew-local-api-key-change-me-32chars-min
 OPENROUTER_API_KEY=replace-with-your-openrouter-api-key
+# AI Gateway routing for OpenRouter traffic (observability/rate limits).
+# Same model, Cloudflare in front. Both required; omit both for direct calls.
+# CF_AIG_TOKEN required only when gateway Settings → Authentication is ON.
+AI_GATEWAY_ID=replace-with-your-ai-gateway-id
+AI_GATEWAY_ACCOUNT_ID=replace-with-your-cloudflare-account-id
+# CF_AIG_TOKEN=replace-with-token-with-AI-Gateway-Edit-plus-Workers-AI-Write
 ENVIRONMENT=local
 ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8788,http://127.0.0.1:5173,http://127.0.0.1:8788

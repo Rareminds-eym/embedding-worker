@@ -9,10 +9,10 @@
     "test": "npx tsx scripts/test-embed.ts"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260313.1",
+    "@cloudflare/workers-types": "^5.20261005.1",
     "@types/node": "^25.5.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "wrangler": "4.120.1"
+    "wrangler": "^4.147.0"
   }
 }

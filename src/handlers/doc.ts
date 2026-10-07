@@ -3,7 +3,7 @@
 import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { callDocProvider, GEMINI_MODEL_ID } from '../providers';
+import { callDocProvider, GEMINI_MODEL_ID, gatewayFromEnv } from '../providers';
 import {
   MAX_DOC_REQUEST_BODY_SIZE,
   MAX_DOC_BINARY_SIZE,
@@ -276,7 +276,7 @@ export async function embedDocCore(
     throw new ValidationError('Document produced no embeddable chunks', ERROR_CODES.INVALID_INPUT);
   }
 
-  const providerResult = await callDocProvider(chunks, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS);
+  const providerResult = await callDocProvider(chunks, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS, gatewayFromEnv(env));
 
   console.log(JSON.stringify({ event: 'embed.success', endpoint: 'doc', type: 'text-chunks', caller_id: callerId, model: GEMINI_MODEL_ID, chunks: chunks.length }));
 

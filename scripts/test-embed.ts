@@ -12,7 +12,7 @@
  * to the value in .dev.vars.
  */
 
-const API_URL = process.env.API_URL || 'http://127.0.0.1:9004';
+const API_URL = process.env.API_URL || 'http://127.0.0.1:9114';
 
 // Single shared API key — must match env.EMBEDDING_API_KEY on the worker.
 const API_KEY = process.env.API_KEY || 'ew-local-api-key-change-me-32chars-min';

@@ -3,7 +3,7 @@
 import type { Env, RequestContext, EmbeddingItem } from '../types';
 import { ValidationError, WorkerError } from '../types';
 import { jsonOk } from '../utils/response';
-import { callImageProvider, GEMINI_MODEL_ID } from '../providers';
+import { callImageProvider, GEMINI_MODEL_ID, gatewayFromEnv } from '../providers';
 import {
   MAX_IMAGE_BATCH_SIZE,
   MAX_IMAGE_REQUEST_BODY_SIZE,
@@ -219,7 +219,7 @@ export async function embedImageCore(
     const batch = await Promise.all(
       resolved.slice(offset, offset + IMAGE_EMBED_CONCURRENCY).map(async ({ mime_type, data }, j) => {
         const i = offset + j;
-        const embedding = await callImageProvider({ mime_type, data }, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS);
+        const embedding = await callImageProvider({ mime_type, data }, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS, gatewayFromEnv(env));
         return { index: i, embedding, dimensions: embedding.length };
       })
     );

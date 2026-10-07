@@ -17,6 +17,35 @@ export const OPENROUTER_TIMEOUT_MS = 30_000;
 const OPENROUTER_OUTPUT_DIM = 1536;
 const PROVIDER_ERROR_PREVIEW = 200;
 
+/**
+ * AI Gateway routing for OpenRouter traffic (same model, Cloudflare
+ * observability/rate-limiting in front). Native gateway OpenRouter provider:
+ * `{gateway}/openrouter` + upstream path. The `/v1` prefix below mirrors the
+ * documented `/openrouter/v1/chat/completions` shape; if the probe 404s,
+ * drop it to `embeddings` (docs show both forms).
+ */
+const GATEWAY_OPENROUTER_PATH = 'openrouter/v1/embeddings';
+
+export interface GatewayConfig {
+  accountId: string;
+  gatewayId: string;
+  /** Optional Cloudflare API token (cf-aig-authorization) when the gateway requires authentication. */
+  cfToken?: string;
+}
+
+/** Build the gateway-routed OpenRouter embeddings URL. Null = call direct. */
+export function buildProviderUrl(gateway: GatewayConfig | undefined): string {
+  if (!gateway || !gateway.accountId || !gateway.gatewayId) return `${OPENROUTER_API_BASE}/embeddings`;
+  return `https://gateway.ai.cloudflare.com/v1/${gateway.accountId}/${gateway.gatewayId}/${GATEWAY_OPENROUTER_PATH}`;
+}
+
+export function gatewayFromEnv(env: { AI_GATEWAY_ACCOUNT_ID?: string; AI_GATEWAY_ID?: string; CF_AIG_TOKEN?: string }): GatewayConfig | undefined {
+  if (!env.AI_GATEWAY_ACCOUNT_ID || !env.AI_GATEWAY_ID) return undefined;
+  const config: GatewayConfig = { accountId: env.AI_GATEWAY_ACCOUNT_ID, gatewayId: env.AI_GATEWAY_ID };
+  if (env.CF_AIG_TOKEN) config.cfToken = env.CF_AIG_TOKEN;
+  return config;
+}
+
 export const GEMINI_MODEL_ID = OPENROUTER_MODEL;
 export const GEMINI_DIMENSIONS = OPENROUTER_OUTPUT_DIM;
 
@@ -182,6 +211,7 @@ async function callOpenRouterEmbeddings(
   endpointLabel: string,
   allowedOrigins: string,
   taskType?: string,
+  gateway?: GatewayConfig,
 ): Promise<number[][]> {
   const inputType = mapTaskTypeToInputType(taskType);
   const body: Record<string, unknown> = {
@@ -203,9 +233,14 @@ async function callOpenRouterEmbeddings(
     'HTTP-Referer': referer,
     'X-Title': 'SkillPassport Embedding Service',
   });
+  // Gateway authentication (only when the gateway requires it): Cloudflare
+  // API token with AI Gateway rights. Absent = unauthenticated gateway mode.
+  if (gateway?.cfToken) {
+    headers.set('cf-aig-authorization', `Bearer ${gateway.cfToken}`);
+  }
 
   return callWithRetry(
-    `${OPENROUTER_API_BASE}/embeddings`,
+    buildProviderUrl(gateway),
     headers,
     body,
     (json) => {
@@ -225,8 +260,9 @@ export async function callTextProvider(
   callerId: string,
   allowedOrigins: string,
   taskType: string = GEMINI_DEFAULT_TASK_TYPE,
+  gateway?: GatewayConfig,
 ): Promise<TextProviderResponse> {
-  const embeddings = await callOpenRouterEmbeddings(input, apiKey, callerId, 'text', allowedOrigins, taskType);
+  const embeddings = await callOpenRouterEmbeddings(input, apiKey, callerId, 'text', allowedOrigins, taskType, gateway);
   if (embeddings.length === 0) throw new ProviderError('text: no embedding returned', 502);
   return { embedding: embeddings[0] };
 }
@@ -236,6 +272,7 @@ export async function callImageProvider(
   apiKey: string,
   callerId: string,
   allowedOrigins: string,
+  gateway?: GatewayConfig,
 ): Promise<number[]> {
   const embeddings = await callOpenRouterEmbeddings(
     [
@@ -250,6 +287,8 @@ export async function callImageProvider(
     callerId,
     'image',
     allowedOrigins,
+    undefined,
+    gateway,
   );
   if (embeddings.length === 0) throw new ProviderError('image: no embedding returned', 502);
   return embeddings[0];
@@ -260,6 +299,7 @@ export async function callDocProvider(
   apiKey: string,
   callerId: string,
   allowedOrigins: string,
+  gateway?: GatewayConfig,
 ): Promise<DocProviderResponse> {
   const result: DocProviderResponse = {
     embeddings: Array.from({ length: chunks.length }, (_, i) => ({ index: i, embedding: [] as number[] })),
@@ -271,7 +311,7 @@ export async function callDocProvider(
   for (let offset = 0; offset < batchStarts.length; offset += MAX_DOC_BATCH_CONCURRENCY) {
     await Promise.all(batchStarts.slice(offset, offset + MAX_DOC_BATCH_CONCURRENCY).map(async (i) => {
       const batch = chunks.slice(i, i + DOC_BATCH_SIZE);
-      const embeddings = await callOpenRouterEmbeddings(batch, apiKey, callerId, `batch[${i}-${i + batch.length - 1}]`, allowedOrigins, GEMINI_DEFAULT_TASK_TYPE);
+      const embeddings = await callOpenRouterEmbeddings(batch, apiKey, callerId, `batch[${i}-${i + batch.length - 1}]`, allowedOrigins, GEMINI_DEFAULT_TASK_TYPE, gateway);
       embeddings.forEach((embedding, j) => { result.embeddings[i + j] = { index: i + j, embedding }; });
     }));
   }

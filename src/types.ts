@@ -8,6 +8,12 @@ export interface Env {
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
   AI: Ai;
+  /** AI Gateway ID routing OpenRouter traffic (observability/rate limits). */
+  AI_GATEWAY_ID?: string;
+  /** Cloudflare API token for gateway auth (cf-aig-authorization). Omit when gateway auth is off. */
+  CF_AIG_TOKEN?: string;
+  /** Cloudflare account ID owning the gateway. */
+  AI_GATEWAY_ACCOUNT_ID?: string;
   RATE_LIMITER?: { limit: (options: { key: string }) => Promise<{ success: boolean }> };
 }
 
