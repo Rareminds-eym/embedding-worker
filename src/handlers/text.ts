@@ -174,7 +174,8 @@ export async function embedTextCore(
   input: unknown,
   taskType: string | undefined,
   env: Env,
-  callerId: string
+  callerId: string,
+  policy?: import('../providers').EmbeddingRequestPolicy,
 ): Promise<TextEmbedResult> {
   if (!env.OPENROUTER_API_KEY) {
     throw new WorkerError('Service misconfigured: OPENROUTER_API_KEY not set', ERROR_CODES.INTERNAL_ERROR, 503);
@@ -217,12 +218,12 @@ export async function embedTextCore(
 
   await checkRateLimit(callerId, 'text', env);
 
-  const result = await callTextProvider(text, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS, resolvedTaskType, gatewayFromEnv(env));
+  const result = await callTextProvider(text, env.OPENROUTER_API_KEY, callerId, env.ALLOWED_ORIGINS, resolvedTaskType, gatewayFromEnv(env),policy);
   const embedding = result.embedding;
 
   return {
     embedding,
-    model: GEMINI_MODEL_ID,
+    model: result.model,
     dimensions: embedding.length,
     task_type: resolvedTaskType,
   };

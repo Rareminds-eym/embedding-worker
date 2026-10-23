@@ -88,9 +88,9 @@ export class EmbeddingService extends WorkerEntrypoint<Env> {
    * @throws Error with a `CODE:` prefix (INVALID_INPUT, RATE_LIMIT_EXCEEDED,
    *   PROVIDER_ERROR, INTERNAL_ERROR).
    */
-  async embedText(input: unknown, taskType?: string): Promise<EmbedTextResult> {
+  async embedText(input: unknown, taskType?: string, policy?: import('./providers').EmbeddingRequestPolicy): Promise<EmbedTextResult> {
     try {
-      return await embedTextCore(input, taskType, this.env, RPC_CALLER_ID);
+      return await embedTextCore(input, taskType, this.env, RPC_CALLER_ID,policy);
     } catch (err) {
       throw toRpcError(err);
     }
