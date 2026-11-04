@@ -75,6 +75,33 @@ simple       = { limit = 120, period = 60 }
 # wrangler secret put OPENROUTER_API_KEY --env dev
 
 # ============================================================================
+# QA -> wrangler deploy --env qa
+# ============================================================================
+[env.qa]
+name = "embedding-api-qa"
+account_id = "d10c2b1a3d702c710a036bc5a6d0902e"
+
+[env.qa.ai]
+binding = "AI"
+
+[env.qa.vars]
+ENVIRONMENT = "qa"
+# Planned QA Pages hosts; update if the deployed project URLs differ.
+ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:8788,https://skillpassport-qa.pages.dev,https://lte-qa.pages.dev"
+
+[[env.qa.kv_namespaces]]
+binding = "EMBEDDING_KV"
+id = "2ea6cacbb6be4be195df5bc800d37fae"
+
+[[env.qa.unsafe.bindings]]
+name = "RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1003"
+simple = { limit = 120, period = 60 }
+
+# Set API credentials separately with: wrangler secret put <NAME> --env qa
+
+# ============================================================================
 # STAGING  →  wrangler deploy --env staging
 # ============================================================================
 [env.staging]
