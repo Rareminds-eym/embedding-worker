@@ -7,7 +7,7 @@ export interface Env {
   OPENROUTER_API_KEY: string;
   ALLOWED_ORIGINS: string;
   ENVIRONMENT: string;
-  AI: Ai;
+  AI?: Ai;
   RATE_LIMITER?: { limit: (options: { key: string }) => Promise<{ success: boolean }> };
 }
 
