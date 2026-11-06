@@ -17,11 +17,11 @@ enabled = true
 # LOCAL  →  wrangler dev  (uses preview_id for KV, secrets from .dev.vars)
 # ============================================================================
 # NOTE: Workers AI (`AI`) has no local emulation — it always proxies to
-# Cloudflare and needs `wrangler login`. It is only used for PDF→markdown
+# Cloudflare and needs `wrangler login`. It is used for document→markdown
 # (env.AI.toMarkdown). Disabled locally so `wrangler dev` runs fully local;
-# text/image/doc embeddings go through GEMINI_API_KEY and are unaffected.
-[ai]
-binding = "AI"
+# Text/image embeddings still use OPENROUTER_API_KEY when requested.
+# Document conversion needs Workers AI and is available in the named deployed
+# environments below; local requests receive an explicit unavailable response.
 
 [vars]
 ENVIRONMENT = "local"
@@ -32,15 +32,8 @@ binding    = "EMBEDDING_KV"
 id         = "REPLACE_WITH_LOCAL_KV_ID"      # local dev — replace with your actual local KV namespace ID
 preview_id = "REPLACE_WITH_LOCAL_KV_ID"      # used by wrangler dev; same as id for local
 
-# Native rate limiting — counters are cached per Cloudflare location and updated
-# asynchronously. namespace_id is a positive integer you choose. period must be 10 or 60.
-# The key passed at runtime is callerId:endpoint (callerId is "http" for all
-# HTTP callers — single shared API key — or "rpc" for service-binding callers).
-[[unsafe.bindings]]
-name         = "RATE_LIMITER"
-type         = "ratelimit"
-namespace_id = "1001"
-simple       = { limit = 120, period = 60 }
+# Local development uses the existing KV limiter fallback. Native rate limiting
+# remains configured in the named deployed environments below.
 
 # KV key schema:
 #   rl:<callerId>:<endpoint>:<window>  → rate-limit counter (fallback limiter)

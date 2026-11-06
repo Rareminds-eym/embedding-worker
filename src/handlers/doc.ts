@@ -158,6 +158,14 @@ export async function embedDocCore(
     throw new ValidationError('input.data exceeds maximum encoded size', ERROR_CODES.INVALID_INPUT);
   }
 
+  if (!env.AI) {
+    throw new WorkerError(
+      'Document conversion requires Workers AI, which is disabled in local development. Use a deployed embedding service for document inputs.',
+      ERROR_CODES.INTERNAL_ERROR,
+      503
+    );
+  }
+
   await checkRateLimit(callerId, 'doc', env);
 
   const docType = ALLOWED_DOC_TYPES[mimeType as AllowedDocMimeType];
