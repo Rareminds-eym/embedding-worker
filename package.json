@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "type-check": "tsc --noEmit",
-    "test": "npx tsx scripts/test-embed.ts"
+    "test": "npx tsx scripts/test-embed.ts",
+    "test:local": "tsx --test --test-concurrency=1 scripts/__tests__/local-runtime.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260804.1",
