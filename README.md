@@ -500,3 +500,18 @@ All provider logic is in `providers.ts`. To switch:
 4. `wrangler secret put <NEW_KEY_NAME>`
 
 Note: Image handler fetches URLs server-side because Gemini requires `inline_data`. If the new provider accepts URLs directly, remove that fetch logic. PDF native path in `doc.ts` is Gemini-specific — other providers would need the `AI.toMarkdown` → chunks path for PDFs.
+
+
+## Local stack startup
+
+The default configuration used by `npm run dev` and the SSO `dev:stack` command
+omits Workers AI and native rate-limit bindings. Starting these local processes
+therefore does not need a Cloudflare AI preview session. Local rate limiting uses
+the existing KV fallback. Text/image embedding requests still call OpenRouter
+and need its configured API key; startup and health checks do not call that provider.
+
+PDF, Word and Excel conversion requires Workers AI. Local document requests return
+an explicit HTTP 503 instead of failing with an undefined-binding exception.
+The named dev, QA, staging and production configurations retain Workers AI.
+Use a deployed embedding service to test document conversion. Secret values stay
+in the local secret file or the deployed secret store.
