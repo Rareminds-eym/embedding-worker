@@ -18,7 +18,23 @@ for (const env of ['dev', 'qa', 'staging', 'production']) {
   test(`${env} retains the deployed Workers AI binding`, () => {
     assert.equal(unstable_readConfig({ config, env }, { hideWarnings: true }).ai?.binding, 'AI');
   });
+  test(`${env} configures a native rate limiter for deployed embedding calls`, async () => {
+    const parsed = unstable_readConfig({ config, env }, { hideWarnings: true });
+    const limiter = parsed.unsafe?.bindings?.find(binding => binding.name === 'RATE_LIMITER');
+    assert.ok(limiter, `${env} requires RATE_LIMITER outside local development`);
+    assert.equal(limiter.type, 'ratelimit');
+    assert.deepEqual(limiter.simple, { limit: 120, period: 60 });
+    const limit = mock.fn(async () => ({ success: true }));
+    await checkRateLimit('rpc', 'text', { ENVIRONMENT: parsed.vars.ENVIRONMENT, RATE_LIMITER: { limit } } as unknown as Env);
+    assert.equal(limit.mock.callCount(), 1);
+    assert.deepEqual(limit.mock.calls[0].arguments, [{ key: 'rpc:text' }]);
+  });
 }
+test('deployed rate limiters use separate namespaces', () => {
+  const namespaces = ['dev', 'qa', 'staging', 'production'].map(env =>
+    unstable_readConfig({ config, env }, { hideWarnings: true }).unsafe?.bindings?.find(binding => binding.name === 'RATE_LIMITER')?.namespace_id);
+  assert.equal(new Set(namespaces).size, namespaces.length);
+});
 test('realtime queue waits use the supported configuration key', () => {
   const realtime = fileURLToPath(new URL('../../../realtime-worker/wrangler.toml', import.meta.url));
   for (const env of [undefined, 'dev']) {
