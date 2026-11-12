@@ -92,7 +92,9 @@ type = "ratelimit"
 namespace_id = "1003"
 simple = { limit = 120, period = 60 }
 
-# Set API credentials separately with: wrangler secret put <NAME> --env qa
+# Required QA secrets (not inherited from other environments):
+# wrangler secret put EMBEDDING_API_KEY --env qa
+# wrangler secret put OPENROUTER_API_KEY --env qa
 
 # ============================================================================
 # STAGING  →  wrangler deploy --env staging
