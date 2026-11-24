@@ -15,14 +15,9 @@
  */
 
 import { WorkerEntrypoint } from 'cloudflare:workers';
+import { embeddingCapabilities } from './capabilities';
+import { toRpcError } from './utils/rpc-error';
 import type { Env, EmbeddingItem } from './types';
-import {
-  ValidationError,
-  RateLimitError,
-  ProviderError,
-  AuthError,
-  WorkerError,
-} from './types';
 import { embedTextCore } from './handlers/text';
 import { embedImageCore } from './handlers/image';
 import { embedDocCore, type DocMetadata } from './handlers/doc';
@@ -61,24 +56,12 @@ export interface DocInput {
  */
 const RPC_CALLER_ID = 'rpc';
 
-/**
- * Normalize an internal worker error into a `CODE: message` Error for transport
- * across the RPC boundary, where custom error classes do not survive.
- *
- * @param err - The error thrown by a core embedding function.
- * @returns An Error whose message is prefixed with a stable error code.
- */
-function toRpcError(err: unknown): Error {
-  if (err instanceof ValidationError) return new Error(`INVALID_INPUT: ${err.message}`);
-  if (err instanceof RateLimitError) return new Error(`RATE_LIMIT_EXCEEDED: ${err.message}`);
-  if (err instanceof ProviderError) return new Error(`PROVIDER_ERROR: ${err.message}`);
-  if (err instanceof AuthError) return new Error(`UNAUTHORIZED: ${err.message}`);
-  if (err instanceof WorkerError) return new Error(`${err.code}: ${err.message}`);
-  const message = err instanceof Error ? err.message : String(err);
-  return new Error(`INTERNAL_ERROR: ${message}`);
-}
-
 export class EmbeddingService extends WorkerEntrypoint<Env> {
+  /** Provider metadata only: no generation request, credentials or app state. */
+  getCapabilities() {
+    return embeddingCapabilities();
+  }
+
   /**
    * Generate a single text embedding.
    *
