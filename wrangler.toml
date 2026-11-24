@@ -92,7 +92,9 @@ type = "ratelimit"
 namespace_id = "1003"
 simple = { limit = 120, period = 60 }
 
-# Set API credentials separately with: wrangler secret put <NAME> --env qa
+# Required QA secrets (not inherited from other environments):
+# wrangler secret put EMBEDDING_API_KEY --env qa
+# wrangler secret put OPENROUTER_API_KEY --env qa
 
 # ============================================================================
 # STAGING  →  wrangler deploy --env staging
@@ -109,6 +111,12 @@ ALLOWED_ORIGINS = "http://localhost:3000,http://localhost:5173,http://localhost:
 [[env.staging.kv_namespaces]]
 binding = "EMBEDDING_KV"
 id = "87fb2ee71c094bf58302e46da00c0f7e"
+
+[[env.staging.unsafe.bindings]]
+name = "RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1004"
+simple = { limit = 120, period = 60 }
 
 # wrangler secret put EMBEDDING_API_KEY --env staging
 # wrangler secret put OPENROUTER_API_KEY --env staging
