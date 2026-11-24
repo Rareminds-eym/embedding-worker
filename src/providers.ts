@@ -13,6 +13,9 @@ import {
 
 const OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1';
 const OPENROUTER_MODEL = 'google/gemini-embedding-2-preview';
+// Verified OpenRouter response identity for this exact requested model. Keep an
+// explicit alias rather than stripping arbitrary vendor prefixes from models.
+const OPENROUTER_RESPONSE_MODELS = new Set([OPENROUTER_MODEL, 'gemini-embedding-2-preview']);
 export const OPENROUTER_TIMEOUT_MS = 30_000;
 const OPENROUTER_OUTPUT_DIM = 1536;
 const PROVIDER_ERROR_PREVIEW = 200;
@@ -58,7 +61,7 @@ interface OpenRouterEmbeddingsResponse {
 function isOpenRouterEmbeddingsResponse(json: unknown): json is OpenRouterEmbeddingsResponse {
   if (!json || typeof json !== 'object') return false;
   const j = json as Record<string, unknown>;
-  if (j.object !== 'list' || !Array.isArray(j.data)) return false;
+  if (j.object !== 'list' || (typeof j.model !== 'string' || !OPENROUTER_RESPONSE_MODELS.has(j.model)) || !Array.isArray(j.data)) return false;
   return j.data.every(item => {
     if (!item || typeof item !== 'object') return false;
     const i = item as Record<string, unknown>;
